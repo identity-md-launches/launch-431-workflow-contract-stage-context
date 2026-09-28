@@ -1,0 +1,33 @@
+{
+  "kind": "evm_project",
+  "token": {
+    "contract": "LaunchToken",
+    "name": "Pacts",
+    "symbol": "PACT",
+    "decimals": 18
+  },
+  "contracts": [
+    {
+      "contract": "Guilds",
+      "constructorArgs": []
+    },
+    {
+      "contract": "Realm",
+      "constructorArgs": [
+        "$token",
+        "$contract:Guilds",
+        "3600",
+        "604800",
+        "1000000000000000000",
+        "1000"
+      ]
+    }
+  ],
+  "pool": {
+    "pairedCurrency": "0x0000000000000000000000000000000000000000",
+    "fee": 3000,
+    "tickSpacing": 60,
+    "initialPrice": "79228162514264337593543950336"
+  },
+  "notes": "Pacts is a public, deterministic guild strategy game on a 12x12 map. Realm uses 3600-second epochs and 604800-second seasons (168 epochs), a troop price of 1000000000000000000 token minor units (1 PACT), and a 1000-basis-point purchase fee for season prizes. Guilds precedes Realm. Realm creates Diplomacy and Season in its constructor; Season creates Banners. Their addresses are available through Realm.diplomacy(), Realm.season(), and Season.banners(). These child contracts must not be deployed again as separate manifest entries: their constructors bind authority to their creating parent, and only Season can mint Banners. Wiring requires no initialization calls or constructor ETH. No owner wallet or post-deployment administrator is required. Game payouts are funded by player payments. The pool pairs with native ETH and has no hook; initialPrice is decimal sqrtPriceX96 (2^96). A pinned policy with an opening market capitalization determines the effective opening price. Policy and signed artifact linkage are supplied by the launch services."
+}
