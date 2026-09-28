@@ -31,6 +31,8 @@ contract PactsHandler is Test {
     uint256 public trophies;
     uint256 public successfulAttacks;
     uint256 public signedPacts;
+    uint256 public refusedPacts;
+    uint256 public refusedHonours;
     uint256 public settledPacts;
     uint256 public closedSeasons;
     uint256 public zeroPrizeClaims;
@@ -59,10 +61,20 @@ contract PactsHandler is Test {
         uint256 count = bound(countSeed, 1, min(maxCount, 1000));
         uint256 cost = count * realm.troopPrice();
         uint256 fee = cost * realm.feeBps() / 10_000;
-        vm.prank(actor);
-        if (useTreasury) realm.buyTroopsFromTreasury(g, count);
-        else realm.buyTroops(g, count);
-        if (!useTreasury) paidIn += cost;
+        uint256 troopsBefore = realm.troops(g);
+        if (useTreasury) {
+            uint256 p = _approve(g, 5, bytes32(count));
+            vm.prank(actor);
+            realm.buyTroopsFromTreasury(p);
+            assertTrue(realm.proposalUsed(p));
+            assertEq(realm.treasury(g), available - cost, "treasury purchase charges exactly the cost");
+            assertEq(realm.pendingIncome(g), 0, "treasury purchase harvests first");
+        } else {
+            vm.prank(actor);
+            realm.buyTroops(g, count);
+            paidIn += cost;
+        }
+        assertEq(realm.troops(g), troopsBefore + count);
         fees += fee;
         troopsBought += count;
     }
@@ -110,8 +122,15 @@ contract PactsHandler is Test {
         address[] memory members = guilds.membersOf(g);
         if (members.length == 0 || realm.troops(g) == 0) return;
         uint256 amount = bound(countSeed, 1, realm.troops(g));
+        uint256 garrisonBefore = realm.garrison(tile);
+        uint256 p = _approve(g, 6, realm.packReinforceData(tile, amount));
         vm.prank(members[0]);
-        realm.reinforce(tile, amount);
+        realm.reinforce(p);
+        assertTrue(realm.proposalUsed(p));
+        assertEq(realm.garrison(tile), garrisonBefore + amount);
+        vm.prank(members[0]);
+        vm.expectRevert(Realm.ProposalUsed.selector);
+        realm.reinforce(p);
     }
 
     function advance(uint256 secondsSeed) public {
@@ -160,16 +179,51 @@ contract PactsHandler is Test {
         address[] memory membersA = guilds.membersOf(a);
         if (membersA.length == 0 || guilds.memberCount(b) == 0) return;
         if (diplomacy.activePactBetween(a, b) != 0) return;
+        uint256 minBond = realm.troopPrice();
         uint256 availableA = realm.treasury(a) + realm.pendingIncome(a);
         uint256 availableB = realm.treasury(b) + realm.pendingIncome(b);
-        uint256 bondA = bound(bondSeed, 0, min(availableA, 10e18));
-        uint256 bondB = bound(bondSeed >> 128, 0, min(availableB, 10e18));
+        if (availableA < minBond || availableB < minBond) return;
+        uint256 bondA = bound(bondSeed, minBond, min(availableA, 10e18));
+        uint256 bondB = bound(bondSeed >> 128, minBond, min(availableB, 10e18));
         uint256 duration = bound(durationSeed, 1, 4);
         uint256 pa = _approve(a, 3, diplomacy.packPactData(b, duration, bondA, bondB));
         uint256 pb = _approve(b, 3, diplomacy.packPactData(a, duration, bondB, bondA));
+        if (_attackInFlightBetween(a, b)) {
+            _expectSigningRefused(membersA[0], pa, pb);
+            assertEq(realm.treasury(a) + realm.pendingIncome(a), availableA);
+            assertEq(realm.treasury(b) + realm.pendingIncome(b), availableB);
+            return;
+        }
         vm.prank(membersA[0]);
-        diplomacy.signPact(pa, pb);
+        uint256 id = diplomacy.signPact(pa, pb);
+        assertEq(diplomacy.pact(id).signedAt, block.timestamp);
+        assertEq(diplomacy.pact(id).endEpoch, realm.currentEpoch() + duration - 1);
+        assertEq(realm.treasury(a) + realm.pendingIncome(a), availableA - bondA, "bond A leaves the treasury");
+        assertEq(realm.treasury(b) + realm.pendingIncome(b), availableB - bondB, "bond B leaves the treasury");
         ++signedPacts;
+    }
+
+    /// @dev An attack between the two declared this epoch has not resolved: signing must be
+    /// refused without consuming the votes.
+    function _expectSigningRefused(address signer, uint256 pa, uint256 pb) private {
+        uint256 pacts = diplomacy.pactCount();
+        vm.prank(signer);
+        vm.expectRevert(Diplomacy.AttackInFlight.selector);
+        diplomacy.signPact(pa, pb);
+        assertEq(diplomacy.pactCount(), pacts);
+        assertFalse(diplomacy.proposalUsed(pa));
+        assertFalse(diplomacy.proposalUsed(pb));
+        ++refusedPacts;
+    }
+
+    function _attackInFlightBetween(uint256 a, uint256 b) private view returns (bool) {
+        uint256 epoch = realm.currentEpoch();
+        return _lastAttackIn(a, b, epoch) || _lastAttackIn(b, a, epoch);
+    }
+
+    function _lastAttackIn(uint256 attacker, uint256 defender, uint256 epoch) private view returns (bool) {
+        uint256 n = realm.attackLogLength(attacker, defender);
+        return n != 0 && realm.attackLogAt(attacker, defender, n - 1) == epoch;
     }
 
     function settlePact(uint256 pactSeed) public {
@@ -263,12 +317,27 @@ contract PactsHandler is Test {
         if (members.length == 0 || season.honourClaimed(id, g)) return;
         if (!diplomacy.hadPactDuring(g, season.firstEpoch(id), season.lastEpoch(id))) return;
         if (diplomacy.betrayedDuring(g, season.firstEpoch(id), season.lastEpoch(id))) return;
-        vm.prank(members[0]);
+        address claimant = members[0];
+        if (guilds.joinedAt(g, claimant) >= realm.seasonEndTime(id)) {
+            // Joined after the season ended: the guild's honour is not this member's to claim.
+            vm.prank(claimant);
+            vm.expectRevert(Season.JoinedAfterSeason.selector);
+            season.claimHonourBanner(id, g);
+            assertFalse(season.honourClaimed(id, g));
+            ++refusedHonours;
+            return;
+        }
+        vm.prank(claimant);
         uint256 nft = season.claimHonourBanner(id, g);
         ++trophies;
-        assertEq(banners.ownerOf(nft), members[0]);
+        assertEq(banners.ownerOf(nft), claimant);
         assertEq(banners.banner(nft).guild, g);
+        assertEq(banners.banner(nft).season, id);
         assertEq(banners.banner(nft).kind, 2);
+        assertTrue(season.honourClaimed(id, g));
+        vm.prank(claimant);
+        vm.expectRevert(Season.AlreadyClaimed.selector);
+        season.claimHonourBanner(id, g);
     }
 
     function transferBanner(uint256 tokenSeed, uint256 recipientSeed, bool useApproval) external {
@@ -581,6 +650,36 @@ contract PactsInvariantTest is StdInvariant, Test {
         assertEq(realm.treasury(2), treasuryB + p.bondA);
         invariant_bondsExactlyMatchUnsettledPacts();
         invariant_realmBalanceExactlyBacksAllLiabilities();
+    }
+
+    function test_handlerRefusesSigningOverAnInFlightAttackThenSignsAfterSettlement() public {
+        handler.attack(0, 2, 1); // guild 1 attacks guild 3's tile this epoch
+        handler.sign(0, 1, 10e18, 2); // guilds 1 and 3: must be refused with AttackInFlight
+        assertEq(handler.refusedPacts(), 1);
+        assertEq(handler.signedPacts(), 1);
+        assertEq(diplomacy.pactCount(), 1);
+        handler.advance(1 hours);
+        handler.settle(160);
+        handler.sign(0, 1, 10e18, 2);
+        assertEq(handler.signedPacts(), 2);
+        assertEq(diplomacy.pact(1).logAB, 1, "the resolved attack is outside the snapshot");
+        (bool byA,, bool byB,) = diplomacy.betrayalOf(1);
+        assertFalse(byA || byB);
+        invariant_bondsExactlyMatchUnsettledPacts();
+        invariant_realmBalanceExactlyBacksAllLiabilities();
+    }
+
+    function test_handlerRefusesHonourBannerToPostSeasonJoiner() public {
+        // Guild 1 held a pact in season 0. Both of its members leave and rejoin at the season
+        // end, so its first member is now a post-season joiner and the guild cannot claim.
+        handler.membership(0, 0);
+        handler.membership(3, 0);
+        assertEq(guilds.memberCount(1), 2);
+        assertGe(guilds.joinedAt(1, handler.actors(0)), realm.seasonEndTime(0));
+        handler.honour(0, 0);
+        assertEq(handler.refusedHonours(), 1);
+        assertFalse(season.honourClaimed(0, 1));
+        assertEq(banners.totalMinted(), handler.trophies());
     }
 
     function test_handlerRejectsOutOfOrderCloseThenCatchesUpInChunks() public {
