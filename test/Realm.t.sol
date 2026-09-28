@@ -4,7 +4,12 @@ pragma solidity 0.8.26;
 import {PactsBase} from "./PactsBase.t.sol";
 import {Realm} from "../src/Realm.sol";
 import {Guilds} from "../src/Guilds.sol";
-import {GUILD_KIND_ATTACK, GUILD_KIND_DISTRIBUTE} from "../src/interfaces/IGuilds.sol";
+import {
+    GUILD_KIND_ATTACK,
+    GUILD_KIND_DISTRIBUTE,
+    GUILD_KIND_BUY_TROOPS,
+    GUILD_KIND_REINFORCE
+} from "../src/interfaces/IGuilds.sol";
 
 contract RealmTest is PactsBase {
     function test_constructorWiring() public view {
@@ -110,12 +115,12 @@ contract RealmTest is PactsBase {
         vm.prank(alice);
         vm.expectRevert(Realm.InsufficientTroops.selector);
         realm.declareAttack(tooMany);
-        uint256 zero = _propose(alice, GUILD_KIND_ATTACK, bytes32(uint256(7) << 128));
+        uint256 zero = _propose(alice, GUILD_KIND_ATTACK, bytes32(uint256(7) << 192));
         _vote(bob, zero, true);
         vm.prank(alice);
         vm.expectRevert(Realm.ZeroAmount.selector);
         realm.declareAttack(zero);
-        uint256 badTile = _propose(alice, GUILD_KIND_ATTACK, bytes32((uint256(144) << 128) | 1));
+        uint256 badTile = _propose(alice, GUILD_KIND_ATTACK, bytes32((uint256(144) << 192) | 1));
         _vote(bob, badTile, true);
         vm.prank(alice);
         vm.expectRevert(Realm.BadTile.selector);
@@ -168,9 +173,10 @@ contract RealmTest is PactsBase {
         vm.prank(alice);
         vm.expectRevert(Realm.EpochNotSettled.selector);
         realm.declareAttack(id);
+        uint256 r = _propose(alice, GUILD_KIND_REINFORCE, realm.packReinforceData(5, 1));
         vm.prank(alice);
         vm.expectRevert(Realm.EpochNotSettled.selector);
-        realm.reinforce(5, 1);
+        realm.reinforce(r);
         _settleAll();
         vm.prank(alice);
         realm.declareAttack(id);
@@ -407,7 +413,7 @@ contract RealmTest is PactsBase {
         _assertRealmSolvent(3, 0);
     }
 
-    function test_reinforceOnlyByHolderMembers() public {
+    function test_reinforceOnlyByVoteOfHolderGuild() public {
         _found(alice, "Alpha");
         _join(bob, 1);
         _found(carol, "Gamma");
@@ -418,25 +424,70 @@ contract RealmTest is PactsBase {
         realm.declareAttack(p);
         _nextEpoch();
         _settleAll();
+        // another guild's vote cannot touch Alpha's tile
+        uint256 foreign = _propose(carol, GUILD_KIND_REINFORCE, realm.packReinforceData(0, 1));
         vm.prank(carol);
         vm.expectRevert(Realm.NotHolder.selector);
-        realm.reinforce(0, 1);
+        realm.reinforce(foreign);
+        // a tile the guild does not hold
+        uint256 notHeld = _propose(alice, GUILD_KIND_REINFORCE, realm.packReinforceData(1, 1));
+        _vote(bob, notHeld, true);
         vm.prank(alice);
         vm.expectRevert(Realm.NotHolder.selector);
-        realm.reinforce(1, 1);
+        realm.reinforce(notHeld);
+        uint256 badTile = _propose(alice, GUILD_KIND_REINFORCE, bytes32((uint256(144) << 192) | 1));
+        _vote(bob, badTile, true);
         vm.prank(alice);
         vm.expectRevert(Realm.BadTile.selector);
-        realm.reinforce(144, 1);
+        realm.reinforce(badTile);
+        uint256 tooMany = _propose(alice, GUILD_KIND_REINFORCE, realm.packReinforceData(0, 11));
+        _vote(bob, tooMany, true);
         vm.prank(bob);
         vm.expectRevert(Realm.InsufficientTroops.selector);
-        realm.reinforce(0, 11);
+        realm.reinforce(tooMany);
+        uint256 zero = _propose(alice, GUILD_KIND_REINFORCE, realm.packReinforceData(0, 0));
+        _vote(bob, zero, true);
         vm.prank(bob);
         vm.expectRevert(Realm.ZeroAmount.selector);
-        realm.reinforce(0, 0);
+        realm.reinforce(zero);
+        uint256 wrongKind = _proposeAttack(alice, 1, 1);
+        _vote(bob, wrongKind, true);
         vm.prank(bob);
-        realm.reinforce(0, 7);
+        vm.expectRevert(Realm.WrongKind.selector);
+        realm.reinforce(wrongKind);
+
+        uint256 ok = _propose(alice, GUILD_KIND_REINFORCE, realm.packReinforceData(0, 7));
+        vm.prank(alice);
+        vm.expectRevert(Realm.NoMajority.selector);
+        realm.reinforce(ok);
+        _vote(bob, ok, true);
+        vm.prank(carol);
+        vm.expectRevert(Realm.NotMember.selector);
+        realm.reinforce(ok);
+        vm.prank(bob);
+        realm.reinforce(ok);
         assertEq(realm.garrison(0), 17);
         assertEq(realm.troops(1), 3);
+        assertTrue(realm.proposalUsed(ok));
+        vm.prank(bob);
+        vm.expectRevert(Realm.ProposalUsed.selector);
+        realm.reinforce(ok);
+    }
+
+    /// @dev Regression: a wallet that just joined cannot commit the guild's pooled troops alone.
+    function test_loneMemberCannotReinforceWithoutVote() public {
+        _found(alice, "Alpha");
+        _buy(alice, 1, 100);
+        _attack(alice, 0, 10);
+        _nextEpoch();
+        _settleAll();
+        _join(erin, 1);
+        uint256 id = _propose(erin, GUILD_KIND_REINFORCE, realm.packReinforceData(0, 90));
+        vm.prank(erin);
+        vm.expectRevert(Realm.NoMajority.selector);
+        realm.reinforce(id);
+        assertEq(realm.troops(1), 90);
+        assertEq(realm.garrison(0), 10);
     }
 
     function test_idleEpochsCannotRecreditIncomeRemainder() public {
@@ -578,24 +629,164 @@ contract RealmTest is PactsBase {
         _assertRealmSolvent(3, 0);
     }
 
-    function test_buyTroopsFromTreasury() public {
+    function test_buyTroopsFromTreasuryByVote() public {
         _found(alice, "Alpha");
+        _join(bob, 1);
         _fund(alice, 1, 50e18);
         assertEq(realm.treasury(1), 50e18);
+        uint256 tooMany = _propose(alice, GUILD_KIND_BUY_TROOPS, bytes32(uint256(51)));
+        _vote(bob, tooMany, true);
         vm.prank(alice);
         vm.expectRevert(Realm.InsufficientTreasury.selector);
-        realm.buyTroopsFromTreasury(1, 51);
-        vm.prank(bob);
-        vm.expectRevert(Realm.NotMember.selector);
-        realm.buyTroopsFromTreasury(1, 1);
+        realm.buyTroopsFromTreasury(tooMany);
+        uint256 zero = _propose(alice, GUILD_KIND_BUY_TROOPS, bytes32(0));
+        _vote(bob, zero, true);
         vm.prank(alice);
-        realm.buyTroopsFromTreasury(1, 20);
+        vm.expectRevert(Realm.ZeroAmount.selector);
+        realm.buyTroopsFromTreasury(zero);
+        uint256 wrongKind = _propose(alice, GUILD_KIND_DISTRIBUTE, bytes32(uint256(1)));
+        _vote(bob, wrongKind, true);
+        vm.prank(alice);
+        vm.expectRevert(Realm.WrongKind.selector);
+        realm.buyTroopsFromTreasury(wrongKind);
+
+        uint256 p = _propose(alice, GUILD_KIND_BUY_TROOPS, bytes32(uint256(20)));
+        vm.prank(alice);
+        vm.expectRevert(Realm.NoMajority.selector);
+        realm.buyTroopsFromTreasury(p);
+        _vote(bob, p, true);
+        vm.prank(carol);
+        vm.expectRevert(Realm.NotMember.selector);
+        realm.buyTroopsFromTreasury(p);
+        vm.prank(bob);
+        realm.buyTroopsFromTreasury(p);
         assertEq(realm.treasury(1), 30e18);
         assertEq(realm.troops(1), 20);
         assertEq(season.prizePool(0), 2e18, "fee applies to treasury purchases too");
         assertEq(realm.incomePool(0), 18e18);
         assertEq(token.balanceOf(address(realm)), 48e18);
+        assertTrue(realm.proposalUsed(p));
+        vm.prank(bob);
+        vm.expectRevert(Realm.ProposalUsed.selector);
+        realm.buyTroopsFromTreasury(p);
         _assertRealmSolvent(1, 0);
+    }
+
+    /// @dev Regression: a wallet with no tokens that joins a guild cannot turn its treasury into
+    /// troops (whose income share would flow to tile holders, i.e. to the joiner's friends).
+    function test_loneMemberCannotSpendTreasuryWithoutVote() public {
+        _found(alice, "Alpha");
+        _found(bob, "Beta");
+        _buy(bob, 2, 10);
+        _attack(bob, 0, 10);
+        _nextEpoch();
+        _settleAll();
+        _nextEpoch();
+        _settleAll();
+        _fund(alice, 1, 1000e18);
+        address mallory = makeAddr("mallory");
+        _join(mallory, 1);
+        uint256 seasonBefore = token.balanceOf(address(season));
+        uint256 pendingBefore = realm.pendingIncome(2);
+        uint256 id = _propose(mallory, GUILD_KIND_BUY_TROOPS, bytes32(uint256(1000)));
+        vm.prank(mallory);
+        vm.expectRevert(Realm.NoMajority.selector);
+        realm.buyTroopsFromTreasury(id);
+        assertEq(realm.treasury(1), 1000e18);
+        assertEq(realm.troops(1), 0);
+        _nextEpoch();
+        _settleAll();
+        assertEq(token.balanceOf(address(season)), seasonBefore);
+        assertEq(realm.pendingIncome(2), pendingBefore);
+    }
+
+    /// @dev Regression: an approval is consumed only while the game state it was given under
+    /// still holds. The tile's defender is bound into the payload and proposals expire.
+    function test_attackProposalBoundToDefenderAndExpires() public {
+        _found(alice, "Alpha");
+        _join(bob, 1);
+        _found(carol, "Gamma");
+        _buy(alice, 1, 10);
+        _buy(carol, 2, 10);
+        uint256 stale = _proposeAttack(alice, 7, 3); // voted against an empty tile
+        _vote(bob, stale, true);
+        (uint256 tile, uint256 defender, uint256 force) = realm.unpackAttackData(guilds.proposal(stale).data);
+        assertEq(tile, 7);
+        assertEq(defender, 0);
+        assertEq(force, 3);
+        _attack(carol, 7, 5);
+        _nextEpoch();
+        _settleAll();
+        assertEq(realm.holder(7), 2);
+        vm.prank(bob);
+        vm.expectRevert(Realm.WrongDefender.selector);
+        realm.declareAttack(stale);
+        // a fresh vote against the actual holder works
+        uint256 fresh = _proposeAttack(alice, 7, 3);
+        _vote(bob, fresh, true);
+        (, defender,) = realm.unpackAttackData(guilds.proposal(fresh).data);
+        assertEq(defender, 2);
+        // ... unless it is left unused for a day
+        vm.warp(block.timestamp + guilds.PROPOSAL_LIFETIME());
+        _settleAll();
+        assertFalse(guilds.isLive(fresh));
+        vm.prank(bob);
+        vm.expectRevert(Realm.ProposalExpired.selector);
+        realm.declareAttack(fresh);
+        uint256 distribute = _propose(alice, GUILD_KIND_DISTRIBUTE, bytes32(0));
+        _vote(bob, distribute, true);
+        vm.warp(block.timestamp + guilds.PROPOSAL_LIFETIME() - 1);
+        assertTrue(guilds.isLive(distribute));
+        vm.warp(block.timestamp + 1);
+        vm.prank(bob);
+        vm.expectRevert(Realm.ProposalExpired.selector);
+        realm.distributeTreasury(distribute);
+    }
+
+    /// @dev Regression: an attack voted before a pact with the tile's holder was signed cannot be
+    /// fired at the partner; breaking a pact needs a vote taken knowing the pact exists.
+    function test_attackVotedBeforePactCannotBreakIt() public {
+        _found(alice, "Alpha");
+        _join(bob, 1);
+        _found(carol, "Gamma");
+        _buy(alice, 1, 10);
+        _buy(carol, 2, 10);
+        _fund(alice, 1, 10e18);
+        _fund(carol, 2, 10e18);
+        _attack(carol, 7, 5);
+        _nextEpoch();
+        _settleAll();
+        uint256 old = _proposeAttack(alice, 7, 3); // against Gamma, before any pact
+        _vote(bob, old, true);
+        vm.warp(block.timestamp + 1);
+        uint256 pa = _proposePact(alice, 2, 5, 5e18, 5e18);
+        _vote(bob, pa, true);
+        uint256 pb = _proposePact(carol, 1, 5, 5e18, 5e18);
+        vm.prank(carol);
+        uint256 pact = diplomacy.signPact(pa, pb);
+        assertEq(diplomacy.pact(pact).signedAt, block.timestamp);
+        vm.prank(bob);
+        vm.expectRevert(Realm.ProposalPredatesPact.selector);
+        realm.declareAttack(old);
+        (bool byA,,,) = diplomacy.betrayalOf(pact);
+        assertFalse(byA);
+        assertEq(realm.lockedBonds(1), 5e18);
+        // a knowing betrayal, voted after the pact, is still possible and still slashed
+        uint256 knowing = _proposeAttack(alice, 7, 3);
+        _vote(bob, knowing, true);
+        vm.prank(bob);
+        realm.declareAttack(knowing);
+        (byA,,,) = diplomacy.betrayalOf(pact);
+        assertTrue(byA);
+        // once the pact is settled the old proposal is an ordinary attack again
+        _nextEpoch();
+        _settleAll();
+        diplomacy.settlePact(pact);
+        assertEq(realm.treasury(2), 10e18 + 5e18);
+        assertEq(realm.holder(7), 2);
+        vm.prank(bob);
+        realm.declareAttack(old);
+        assertEq(diplomacy.pact(pact).brokenBy, 1);
     }
 
     function test_bondFunctionsOnlyForDiplomacy() public {
@@ -642,10 +833,10 @@ contract RealmTest is PactsBase {
         realm.distributeTreasury(1);
         vm.expectRevert(Realm.NotDiplomacy.selector);
         realm.slashBond(1, 2, 1);
-        vm.expectRevert(Realm.NotMember.selector);
-        realm.buyTroopsFromTreasury(1, 1);
-        vm.expectRevert(Realm.NotHolder.selector);
-        realm.reinforce(0, 1);
+        vm.expectRevert(Realm.WrongKind.selector);
+        realm.buyTroopsFromTreasury(1);
+        vm.expectRevert(Realm.WrongKind.selector);
+        realm.reinforce(1);
         vm.expectRevert(Realm.WrongKind.selector);
         realm.declareAttack(99);
         vm.stopPrank();
@@ -655,11 +846,31 @@ contract RealmTest is PactsBase {
         assertEq(address(realm).balance, 0);
     }
 
-    function test_attackPackingRoundTrip() public view {
-        bytes32 data = realm.packAttackData(143, 12345);
-        (uint256 tile, uint256 count) = realm.unpackAttackData(data);
+    function test_attackPackingRoundTrip() public {
+        bytes32 data = realm.packAttackDataAgainst(143, 12345, 77);
+        (uint256 tile, uint256 defender, uint256 count) = realm.unpackAttackData(data);
         assertEq(tile, 143);
+        assertEq(defender, 77);
         assertEq(count, 12345);
+        assertEq(realm.packAttackData(143, 12345), realm.packAttackDataAgainst(143, 12345, 0), "unheld: defender 0");
+        (tile, defender, count) = realm.unpackAttackData(realm.packReinforceData(143, 12345));
+        assertEq(tile, 143);
+        assertEq(defender, 0);
+        assertEq(count, 12345);
+        _found(alice, "Alpha");
+        _buy(alice, 1, 1);
+        _attack(alice, 143, 1);
+        _nextEpoch();
+        _settleAll();
+        assertEq(realm.packAttackData(143, 5), realm.packAttackDataAgainst(143, 5, 1), "binds the current holder");
+        vm.expectRevert(bytes("pack"));
+        realm.packAttackData(144, 1);
+        vm.expectRevert(bytes("pack"));
+        realm.packAttackDataAgainst(0, 2 ** 128, 0);
+        vm.expectRevert(bytes("pack"));
+        realm.packAttackDataAgainst(0, 1, 2 ** 64);
+        vm.expectRevert(bytes("pack"));
+        realm.packReinforceData(144, 1);
     }
 
     function test_attackLogRecordsOnlyHeldTargets() public {

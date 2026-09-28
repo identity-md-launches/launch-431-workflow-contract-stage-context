@@ -593,7 +593,7 @@
   },
   {
     "type": "error",
-    "name": "GuildTooYoung",
+    "name": "JoinedAfterSeason",
     "inputs": []
   },
   {

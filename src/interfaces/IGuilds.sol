@@ -5,6 +5,8 @@ uint8 constant GUILD_KIND_EXPEL = 1;
 uint8 constant GUILD_KIND_ATTACK = 2;
 uint8 constant GUILD_KIND_PACT = 3;
 uint8 constant GUILD_KIND_DISTRIBUTE = 4;
+uint8 constant GUILD_KIND_BUY_TROOPS = 5;
+uint8 constant GUILD_KIND_REINFORCE = 6;
 
 /// @notice The subset of Guilds that Realm, Diplomacy and Season read.
 interface IGuilds {
@@ -28,7 +30,9 @@ interface IGuilds {
     function isMember(uint256 guildId, address account) external view returns (bool);
     function membersOf(uint256 guildId) external view returns (address[] memory);
     function memberCount(uint256 guildId) external view returns (uint256);
+    function joinedAt(uint256 guildId, address account) external view returns (uint256);
     function hasMajority(uint256 proposalId) external view returns (bool);
+    function isLive(uint256 proposalId) external view returns (bool);
     function proposal(uint256 proposalId) external view returns (Proposal memory);
     function guild(uint256 guildId) external view returns (Guild memory);
 }

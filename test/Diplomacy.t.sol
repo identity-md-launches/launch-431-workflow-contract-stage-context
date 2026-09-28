@@ -116,19 +116,87 @@ contract DiplomacyTest is PactsBase {
         vm.prank(alice);
         vm.expectRevert(Diplomacy.ProposalUsed.selector);
         diplomacy.signPact(pa, pb);
-        uint256 pa2 = _proposePact(alice, 2, 3, 1, 1);
-        uint256 pb2 = _proposePact(bob, 1, 3, 1, 1);
+        uint256 pa2 = _proposePact(alice, 2, 3, PRICE, PRICE);
+        uint256 pb2 = _proposePact(bob, 1, 3, PRICE, PRICE);
         _vote(carol, pb2, true);
         vm.prank(alice);
         vm.expectRevert(Diplomacy.PactExists.selector);
         diplomacy.signPact(pa2, pb2);
         // treasury too small for the bond
         _found(dave, "Delta");
-        uint256 pa3 = _proposePact(alice, 3, 3, 100e18, 0);
-        uint256 pd = _proposePact(dave, 1, 3, 0, 100e18);
+        uint256 pa3 = _proposePact(alice, 3, 3, PRICE, 100e18);
+        uint256 pd = _proposePact(dave, 1, 3, 100e18, PRICE);
         vm.prank(dave);
         vm.expectRevert(Realm.InsufficientTreasury.selector);
         diplomacy.signPact(pa3, pd);
+        // expired proposals cannot be signed
+        _fund(dave, 3, 100e18);
+        vm.warp(block.timestamp + guilds.PROPOSAL_LIFETIME());
+        vm.prank(dave);
+        vm.expectRevert(Diplomacy.ProposalExpired.selector);
+        diplomacy.signPact(pa3, pd);
+    }
+
+    function test_signPactRequiresMinimumBonds() public {
+        _twoGuildsWithTiles();
+        uint256 pa = _proposePact(alice, 2, 3, PRICE - 1, PRICE);
+        uint256 pb = _proposePact(bob, 1, 3, PRICE, PRICE - 1);
+        vm.prank(alice);
+        vm.expectRevert(Diplomacy.BondTooSmall.selector);
+        diplomacy.signPact(pa, pb);
+        uint256 pa0 = _proposePact(alice, 2, 3, 0, 0);
+        uint256 pb0 = _proposePact(bob, 1, 3, 0, 0);
+        vm.prank(alice);
+        vm.expectRevert(Diplomacy.BondTooSmall.selector);
+        diplomacy.signPact(pa0, pb0);
+        uint256 pa1 = _proposePact(alice, 2, 3, PRICE, PRICE);
+        uint256 pb1 = _proposePact(bob, 1, 3, PRICE, PRICE);
+        vm.prank(alice);
+        diplomacy.signPact(pa1, pb1);
+        assertEq(realm.lockedBonds(1), PRICE);
+        assertEq(realm.lockedBonds(2), PRICE);
+    }
+
+    /// @dev Regression: an attack on the partner declared earlier in the signing epoch would
+    /// resolve inside the pact window without counting as a betrayal, so signing is refused
+    /// until that epoch has ended, in either direction.
+    function test_signPactRefusedWhileAttackOnPartnerIsInFlight() public {
+        _twoGuildsWithTiles();
+        uint256 pa = _proposePact(alice, 2, 3, BOND_A, BOND_B);
+        uint256 pb = _proposePact(bob, 1, 3, BOND_B, BOND_A);
+        _attack(alice, 1, 5); // Alpha attacks Beta's tile, then tries to sign
+        vm.prank(alice);
+        vm.expectRevert(Diplomacy.AttackInFlight.selector);
+        diplomacy.signPact(pa, pb);
+        vm.prank(bob);
+        vm.expectRevert(Diplomacy.AttackInFlight.selector);
+        diplomacy.signPact(pa, pb);
+        assertEq(realm.lockedBonds(1) + realm.lockedBonds(2), 0);
+        // next epoch, once the attack has resolved, the same proposals can be signed
+        _nextEpoch();
+        _settleAll();
+        vm.prank(alice);
+        uint256 id = diplomacy.signPact(pa, pb);
+        assertEq(diplomacy.pact(id).logAB, 1, "snapshot after the resolved attack");
+        assertEq(diplomacy.pact(id).signedAt, block.timestamp);
+        (bool byA,, bool byB,) = diplomacy.betrayalOf(id);
+        assertFalse(byA || byB);
+        // the mirror case: the partner attacked first in the signing epoch
+        _found(carol, "Gamma");
+        _buy(carol, 3, 10);
+        _fund(carol, 3, 10e18);
+        _attack(carol, 0, 5); // Gamma attacks Alpha
+        uint256 pa2 = _proposePact(alice, 3, 2, PRICE, PRICE);
+        uint256 pc = _proposePact(carol, 1, 2, PRICE, PRICE);
+        vm.prank(alice);
+        vm.expectRevert(Diplomacy.AttackInFlight.selector);
+        diplomacy.signPact(pa2, pc);
+        // an attack on a third party or an empty tile does not block signing
+        _attack(alice, 9, 1);
+        _nextEpoch();
+        _settleAll();
+        vm.prank(carol);
+        diplomacy.signPact(pa2, pc);
     }
 
     function test_betrayalSlashesBondToVictim() public {
@@ -246,10 +314,12 @@ contract DiplomacyTest is PactsBase {
         assertEq(realm.treasury(2), 100e18);
         assertEq(realm.lockedBonds(1), 0);
         assertEq(realm.lockedBonds(2), 0);
-        // an attack after expiry is not a betrayal and a new pact can be signed
+        // an attack after expiry is not a betrayal and, once it has resolved, a new pact can be signed
         _attack(bob, 0, 5);
         (bool byA,, bool byB,) = diplomacy.betrayalOf(0);
         assertFalse(byA || byB);
+        _nextEpoch();
+        _settleAll();
         uint256 id = _signDefault(1);
         assertEq(id, 1);
         assertEq(diplomacy.pact(1).logBA, 1, "log snapshot skips the earlier attack");
@@ -283,8 +353,8 @@ contract DiplomacyTest is PactsBase {
     }
 
     function testFuzz_bondAccounting(uint96 bondA, uint96 bondB, bool betray) public {
-        bondA = uint96(bound(bondA, 0, 100e18));
-        bondB = uint96(bound(bondB, 0, 100e18));
+        bondA = uint96(bound(bondA, PRICE, 100e18));
+        bondB = uint96(bound(bondB, PRICE, 100e18));
         _twoGuildsWithTiles();
         uint256 pa = _proposePact(alice, 2, 2, bondA, bondB);
         uint256 pb = _proposePact(bob, 1, 2, bondB, bondA);

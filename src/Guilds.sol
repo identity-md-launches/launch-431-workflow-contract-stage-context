@@ -3,19 +3,25 @@ pragma solidity 0.8.26;
 
 /// @title Guilds
 /// @notice Guild membership and one-member-one-vote proposals for the Pacts game.
-/// @dev Anyone can found or join a guild. Every game action a guild takes (attack, pact,
-/// treasury distribution, expulsion) is a proposal that passes when a strict majority of the
+/// @dev Anyone can found or join a guild. Every game action a guild takes (attack, reinforcement,
+/// pact, treasury spending, expulsion) is a proposal that passes when a strict majority of the
 /// guild's current members has voted yes. Only expulsions are executed here; Realm and Diplomacy
-/// read the other kinds through {proposal} and {hasMajority} and record their own execution.
-/// Because the majority is recounted among current members at execution time, a member who
-/// leaves or is expelled no longer counts, and any member can withdraw support by voting no.
+/// read the other kinds through {proposal}, {hasMajority} and {isLive} and record their own
+/// execution. Because the majority is recounted among current members at execution time, a
+/// member who leaves or is expelled no longer counts, and any member can withdraw support by
+/// voting no. A proposal can only be executed within {PROPOSAL_LIFETIME} of its creation, so an
+/// approval given under one state of the game cannot be consumed long after that state changed.
 contract Guilds {
     uint256 public constant MAX_MEMBERS = 32;
+    /// @notice How long a passed proposal stays executable after it was created.
+    uint256 public constant PROPOSAL_LIFETIME = 1 days;
 
     uint8 public constant KIND_EXPEL = 1;
     uint8 public constant KIND_ATTACK = 2;
     uint8 public constant KIND_PACT = 3;
     uint8 public constant KIND_DISTRIBUTE = 4;
+    uint8 public constant KIND_BUY_TROOPS = 5;
+    uint8 public constant KIND_REINFORCE = 6;
 
     uint8 public constant VOTE_YES = 1;
     uint8 public constant VOTE_NO = 2;
@@ -42,6 +48,8 @@ contract Guilds {
     mapping(uint256 guildId => address[]) private _members;
     mapping(uint256 guildId => mapping(address member => uint256)) private _memberIndex; // 1-based
     mapping(address member => uint256 guildId) public guildOf;
+    /// @notice When the account joined the guild (0 when not a member). Reset on every join.
+    mapping(uint256 guildId => mapping(address member => uint256)) public joinedAt;
     mapping(uint256 guildId => mapping(address member => bool)) public banned;
     mapping(uint256 proposalId => Proposal) private _proposals;
     mapping(uint256 proposalId => mapping(address voter => uint8)) public votes;
@@ -65,6 +73,7 @@ contract Guilds {
     error WrongKind();
     error NoMajority();
     error AlreadyExecuted();
+    error ProposalExpired();
     error InvalidKind();
     error InvalidTarget();
     error EmptyName();
@@ -102,12 +111,13 @@ contract Guilds {
     // ---------------------------------------------------------------- proposals
 
     /// @notice Open a proposal for the caller's guild. The proposer votes yes automatically.
-    /// @param kind One of KIND_EXPEL, KIND_ATTACK, KIND_PACT or KIND_DISTRIBUTE.
+    /// @param kind One of KIND_EXPEL, KIND_ATTACK, KIND_PACT, KIND_DISTRIBUTE, KIND_BUY_TROOPS or
+    /// KIND_REINFORCE.
     /// @param data Kind-specific payload; see Realm and Diplomacy for the packed layouts.
     function propose(uint8 kind, bytes32 data) external returns (uint256 proposalId) {
         uint256 guildId = guildOf[msg.sender];
         if (guildId == 0) revert NotInGuild();
-        if (kind == 0 || kind > KIND_DISTRIBUTE) revert InvalidKind();
+        if (kind == 0 || kind > KIND_REINFORCE) revert InvalidKind();
         if (kind == KIND_EXPEL) {
             address target = address(uint160(uint256(data)));
             if (target == msg.sender || guildOf[target] != guildId) revert InvalidTarget();
@@ -144,6 +154,7 @@ contract Guilds {
         if (guildOf[msg.sender] != guildId) revert NotMember();
         address target = address(uint160(uint256(p.data)));
         if (guildOf[target] != guildId) revert InvalidTarget();
+        if (!isLive(proposalId)) revert ProposalExpired();
         if (!hasMajority(proposalId)) revert NoMajority();
         p.executed = true;
         banned[guildId][target] = true;
@@ -190,12 +201,20 @@ contract Guilds {
         return n != 0 && yesVotes(proposalId) * 2 > n;
     }
 
+    /// @notice True while the proposal exists and less than {PROPOSAL_LIFETIME} has passed since
+    /// it was created. Executors refuse expired proposals whatever their vote count.
+    function isLive(uint256 proposalId) public view returns (bool) {
+        Proposal storage p = _proposals[proposalId];
+        return p.kind != 0 && block.timestamp < uint256(p.createdAt) + PROPOSAL_LIFETIME;
+    }
+
     // ---------------------------------------------------------------- internals
 
     function _add(uint256 guildId, address account) private {
         _members[guildId].push(account);
         _memberIndex[guildId][account] = _members[guildId].length;
         guildOf[account] = guildId;
+        joinedAt[guildId][account] = block.timestamp;
     }
 
     function _remove(uint256 guildId, address account) private {
@@ -210,5 +229,6 @@ contract Guilds {
         members.pop();
         delete _memberIndex[guildId][account];
         delete guildOf[account];
+        delete joinedAt[guildId][account];
     }
 }

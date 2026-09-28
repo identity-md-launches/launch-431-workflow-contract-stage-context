@@ -6,6 +6,7 @@ interface IRealm {
     function currentEpoch() external view returns (uint256);
     function settledEpoch() external view returns (uint256);
     function epochsPerSeason() external view returns (uint256);
+    function troopPrice() external view returns (uint256);
     function seasonEndTime(uint256 season) external view returns (uint256);
     function tilesAtSeasonEnd(uint256 guildId, uint256 season) external view returns (uint256);
     function attackLogLength(uint256 attacker, uint256 defender) external view returns (uint256);

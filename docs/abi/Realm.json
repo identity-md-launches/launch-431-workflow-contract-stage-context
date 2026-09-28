@@ -269,12 +269,7 @@
     "name": "buyTroopsFromTreasury",
     "inputs": [
       {
-        "name": "guildId",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "count",
+        "name": "proposalId",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -658,6 +653,59 @@
         "internalType": "bytes32"
       }
     ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "packAttackDataAgainst",
+    "inputs": [
+      {
+        "name": "tile",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "troopCount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "defender",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "packReinforceData",
+    "inputs": [
+      {
+        "name": "tile",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "troopCount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
     "stateMutability": "pure"
   },
   {
@@ -703,12 +751,7 @@
     "name": "reinforce",
     "inputs": [
       {
-        "name": "tile",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "count",
+        "name": "proposalId",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -1021,6 +1064,11 @@
         "internalType": "uint256"
       },
       {
+        "name": "defender",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
         "name": "troopCount",
         "type": "uint256",
         "internalType": "uint256"
@@ -1255,6 +1303,12 @@
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
+      },
+      {
+        "name": "proposalId",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
       }
     ],
     "anonymous": false
@@ -1393,10 +1447,10 @@
         "internalType": "uint256"
       },
       {
-        "name": "fromTreasury",
-        "type": "bool",
+        "name": "proposalId",
+        "type": "uint256",
         "indexed": false,
-        "internalType": "bool"
+        "internalType": "uint256"
       }
     ],
     "anonymous": false
@@ -1463,6 +1517,16 @@
   },
   {
     "type": "error",
+    "name": "ProposalExpired",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ProposalPredatesPact",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "ProposalUsed",
     "inputs": []
   },
@@ -1474,6 +1538,11 @@
   {
     "type": "error",
     "name": "TransferFailed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "WrongDefender",
     "inputs": []
   },
   {

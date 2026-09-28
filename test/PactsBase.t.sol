@@ -98,6 +98,20 @@ abstract contract PactsBase is Test {
         attackId = realm.declareAttack(id);
     }
 
+    /// @dev Propose and execute a reinforcement for a guild whose majority is the proposer alone.
+    function _reinforce(address who, uint256 tile, uint256 count) internal {
+        uint256 id = _propose(who, guilds.KIND_REINFORCE(), realm.packReinforceData(tile, count));
+        vm.prank(who);
+        realm.reinforce(id);
+    }
+
+    /// @dev Propose and execute a treasury purchase for a guild whose majority is the proposer alone.
+    function _buyFromTreasury(address who, uint256 count) internal {
+        uint256 id = _propose(who, guilds.KIND_BUY_TROOPS(), bytes32(count));
+        vm.prank(who);
+        realm.buyTroopsFromTreasury(id);
+    }
+
     function _proposePact(address who, uint256 partner, uint256 duration, uint256 ownBond, uint256 partnerBond)
         internal
         returns (uint256 id)

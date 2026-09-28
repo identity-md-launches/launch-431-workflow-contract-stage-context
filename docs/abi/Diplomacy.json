@@ -239,6 +239,11 @@
             "internalType": "uint8"
           },
           {
+            "name": "signedAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
             "name": "bondA",
             "type": "uint256",
             "internalType": "uint256"
@@ -528,7 +533,17 @@
   },
   {
     "type": "error",
+    "name": "AttackInFlight",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "BadDuration",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BondTooSmall",
     "inputs": []
   },
   {
@@ -554,6 +569,11 @@
   {
     "type": "error",
     "name": "PactStillActive",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ProposalExpired",
     "inputs": []
   },
   {

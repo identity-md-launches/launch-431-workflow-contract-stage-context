@@ -12,6 +12,8 @@ import {IRealm} from "./interfaces/IRealm.sol";
 /// attack on a tile the partner holds during the pact window. Anyone can settle a pact once
 /// the first betrayal epoch has ended, or once the window has passed; the outcome is the same whoever calls and
 /// whenever they call, so the slash is automatic in effect even though a transaction triggers it.
+/// A pact cannot be signed while either guild has an attack on the other in flight in the
+/// signing epoch, so every attack declared on a partner from the signing onwards is a betrayal.
 contract Diplomacy {
     struct Pact {
         uint64 guildA;
@@ -20,6 +22,7 @@ contract Diplomacy {
         uint64 endEpoch; // inclusive
         bool settled;
         uint8 brokenBy; // bit 0: guildA betrayed, bit 1: guildB betrayed (set at settlement)
+        uint64 signedAt; // timestamp of signing; attack proposals older than this cannot break the pact
         uint256 bondA;
         uint256 bondB;
         uint256 logAB; // realm attack log length A->B at signing
@@ -53,12 +56,15 @@ contract Diplomacy {
 
     error WrongKind();
     error ProposalUsed();
+    error ProposalExpired();
     error SamePartner();
     error TermsMismatch();
     error BadDuration();
+    error BondTooSmall();
     error NotMember();
     error NoMajority();
     error PactExists();
+    error AttackInFlight();
     error NoSuchPact();
     error AlreadySettled();
     error PactStillActive();
@@ -95,19 +101,25 @@ contract Diplomacy {
 
     // ---------------------------------------------------------------- actions
 
-    /// @notice Sign a pact from two passed proposals whose terms mirror each other.
+    /// @notice Sign a pact from two passed, unexpired proposals whose terms mirror each other.
+    /// Reverts while either guild has declared an attack on the other in the current epoch: such
+    /// an attack still resolves inside the pact window, so it must be settled first.
     /// @param proposalA A KIND_PACT proposal of the first guild naming the second as partner.
     /// @param proposalB The matching proposal of the second guild.
     function signPact(uint256 proposalA, uint256 proposalB) external returns (uint256 pactId) {
         if (proposalUsed[proposalA] || proposalUsed[proposalB]) revert ProposalUsed();
+        if (!guilds.isLive(proposalA) || !guilds.isLive(proposalB)) revert ProposalExpired();
         if (!guilds.hasMajority(proposalA) || !guilds.hasMajority(proposalB)) revert NoMajority();
         (uint256 a, uint256 b, uint256 duration, uint256 bondA, uint256 bondB) = _matchTerms(proposalA, proposalB);
         if (!guilds.isMember(a, msg.sender) && !guilds.isMember(b, msg.sender)) revert NotMember();
         if (activePactBetween[a][b] != 0) revert PactExists();
+        uint256 start = realm.currentEpoch();
+        uint256 logAB = realm.attackLogLength(a, b);
+        uint256 logBA = realm.attackLogLength(b, a);
+        if (_lastAttackEpochIs(a, b, logAB, start) || _lastAttackEpochIs(b, a, logBA, start)) revert AttackInFlight();
 
         proposalUsed[proposalA] = true;
         proposalUsed[proposalB] = true;
-        uint256 start = realm.currentEpoch();
         pactId = _pacts.length;
         _pacts.push(
             Pact({
@@ -117,10 +129,11 @@ contract Diplomacy {
                 endEpoch: uint64(start + duration - 1),
                 settled: false,
                 brokenBy: 0,
+                signedAt: uint64(block.timestamp),
                 bondA: bondA,
                 bondB: bondB,
-                logAB: realm.attackLogLength(a, b),
-                logBA: realm.attackLogLength(b, a)
+                logAB: logAB,
+                logBA: logBA
             })
         );
         _pactsOf[a].push(pactId);
@@ -235,7 +248,8 @@ contract Diplomacy {
     // ---------------------------------------------------------------- internals
 
     /// @dev Both proposals must be KIND_PACT, from two different guilds, each naming the other as
-    /// partner with the same duration and mirrored bonds.
+    /// partner with the same duration and mirrored bonds. Each bond is at least one troop's price,
+    /// so a pact always carries a stake.
     function _matchTerms(uint256 proposalA, uint256 proposalB)
         private
         view
@@ -253,9 +267,22 @@ contract Diplomacy {
             revert TermsMismatch();
         }
         if (durA == 0) revert BadDuration();
+        uint256 minBond = realm.troopPrice();
+        if (ownA < minBond || ownB < minBond) revert BondTooSmall();
         duration = durA;
         bondA = ownA;
         bondB = ownB;
+    }
+
+    /// @dev True when the attack log attacker->defender of length `length` ends with an entry
+    /// declared in `epoch`. Entries are appended in epoch order, so this finds any attack
+    /// declared in the current epoch.
+    function _lastAttackEpochIs(uint256 attacker, uint256 defender, uint256 length, uint256 epoch)
+        private
+        view
+        returns (bool)
+    {
+        return length != 0 && realm.attackLogAt(attacker, defender, length - 1) == epoch;
     }
 
     /// @dev The first attack each side declared on the other inside the window. If both betrayed,

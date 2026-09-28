@@ -2,7 +2,13 @@
 pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IGuilds, GUILD_KIND_ATTACK, GUILD_KIND_DISTRIBUTE} from "./interfaces/IGuilds.sol";
+import {
+    IGuilds,
+    GUILD_KIND_ATTACK,
+    GUILD_KIND_DISTRIBUTE,
+    GUILD_KIND_BUY_TROOPS,
+    GUILD_KIND_REINFORCE
+} from "./interfaces/IGuilds.sol";
 import {Diplomacy} from "./Diplomacy.sol";
 import {Season} from "./Season.sol";
 
@@ -14,6 +20,10 @@ import {Season} from "./Season.sol";
 /// Attacks are declared openly during an epoch after a guild vote, with troops committed at
 /// declaration, and every attack on a tile resolves together when the epoch is settled. Anyone
 /// can settle. All tokens the contract pays out were paid in by players; nothing is minted.
+///
+/// Every move of pooled guild resources (attacks, reinforcements, treasury purchases and
+/// distributions) executes a passed, unexpired guild proposal; a lone member can only add to the
+/// guild (buy troops with their own tokens, donate to the treasury).
 ///
 /// Realm creates Diplomacy and Season in its constructor. That is the only way, with
 /// constructor-only wiring and no post-deployment calls, for Realm to trust Diplomacy with
@@ -88,11 +98,16 @@ contract Realm {
         uint256 count,
         uint256 cost,
         uint256 fee,
-        bool fromTreasury
+        uint256 proposalId // 0 when bought with the buyer's own tokens
     );
     event TreasuryFunded(uint256 indexed guildId, address indexed from, uint256 amount);
     event Reinforced(
-        uint256 indexed tile, uint256 indexed guildId, address indexed member, uint256 count, uint256 garrison
+        uint256 indexed tile,
+        uint256 indexed guildId,
+        address indexed member,
+        uint256 count,
+        uint256 garrison,
+        uint256 proposalId
     );
     event AttackDeclared(
         uint256 indexed attackId,
@@ -126,7 +141,10 @@ contract Realm {
     error NotHolder();
     error WrongKind();
     error ProposalUsed();
+    error ProposalExpired();
     error NoMajority();
+    error WrongDefender();
+    error ProposalPredatesPact();
     error BadTile();
     error OwnTile();
     error AlreadyAttacking();
@@ -189,18 +207,20 @@ contract Realm {
         if (count == 0) revert ZeroAmount();
         uint256 cost = count * troopPrice;
         if (!token.transferFrom(msg.sender, address(this), cost)) revert TransferFailed();
-        _credit(guildId, count, cost, false);
+        _credit(guildId, count, cost, 0);
     }
 
-    /// @notice Buy troops with the guild treasury (harvested income, returned bonds, donations).
-    function buyTroopsFromTreasury(uint256 guildId, uint256 count) external {
-        _requireMember(guildId);
+    /// @notice Buy troops with the guild treasury (harvested income, returned bonds, donations)
+    /// after a KIND_BUY_TROOPS vote. The payload is the troop count.
+    function buyTroopsFromTreasury(uint256 proposalId) external {
+        (uint256 guildId, bytes32 data) = _consumeProposal(proposalId, GUILD_KIND_BUY_TROOPS);
+        uint256 count = uint256(data);
         if (count == 0) revert ZeroAmount();
         uint256 cost = count * troopPrice;
         _harvest(guildId);
         if (treasury[guildId] < cost) revert InsufficientTreasury();
         treasury[guildId] -= cost;
-        _credit(guildId, count, cost, true);
+        _credit(guildId, count, cost, proposalId);
     }
 
     /// @notice Donate tokens to the caller's guild treasury, for example to back a pact bond.
@@ -212,7 +232,7 @@ contract Realm {
         emit TreasuryFunded(guildId, msg.sender, amount);
     }
 
-    function _credit(uint256 guildId, uint256 count, uint256 cost, bool fromTreasury) private {
+    function _credit(uint256 guildId, uint256 count, uint256 cost, uint256 proposalId) private {
         uint256 epoch = currentEpoch();
         uint256 fee = cost * feeBps / BPS;
         if (fee != 0) {
@@ -221,37 +241,58 @@ contract Realm {
         }
         incomePool[epoch] += cost - fee;
         troops[guildId] += count;
-        emit TroopsBought(guildId, msg.sender, epoch, count, cost, fee, fromTreasury);
+        emit TroopsBought(guildId, msg.sender, epoch, count, cost, fee, proposalId);
     }
 
     // ---------------------------------------------------------------- moves
 
-    /// @notice Move troops from the guild pool onto a tile the guild holds. Garrisons stay until
-    /// the tile is fought over.
-    function reinforce(uint256 tile, uint256 count) external {
+    /// @notice Move troops from the guild pool onto a tile the guild holds, after a
+    /// KIND_REINFORCE vote (payload from {packReinforceData}). Garrisons stay until the tile is
+    /// fought over.
+    function reinforce(uint256 proposalId) external {
         _requireSettled();
+        (uint256 guildId, bytes32 data) = _consumeProposal(proposalId, GUILD_KIND_REINFORCE);
+        (uint256 tile,, uint256 count) = unpackAttackData(data);
         if (tile >= TILE_COUNT) revert BadTile();
         if (count == 0) revert ZeroAmount();
-        uint256 guildId = holder[tile];
-        if (guildId == 0 || !guilds.isMember(guildId, msg.sender)) revert NotHolder();
+        if (holder[tile] != guildId) revert NotHolder();
         if (troops[guildId] < count) revert InsufficientTroops();
         troops[guildId] -= count;
         garrison[tile] += count;
-        emit Reinforced(tile, guildId, msg.sender, count, garrison[tile]);
+        emit Reinforced(tile, guildId, msg.sender, count, garrison[tile], proposalId);
     }
 
-    /// @notice Pack the payload of a KIND_ATTACK proposal: tile (upper 128 bits) | troops.
-    function packAttackData(uint256 tile, uint256 troopCount) public pure returns (bytes32) {
+    /// @notice Pack the payload of a KIND_ATTACK proposal against the tile's current holder.
+    /// @dev Layout: tile (bits 192..255) | expected defender guild (bits 128..191) | troops
+    /// (bits 0..127). The attack can only be declared while the tile is still held by the
+    /// expected defender, so a vote taken against one guild (or an empty tile) cannot be fired at
+    /// whoever holds the tile later.
+    function packAttackData(uint256 tile, uint256 troopCount) external view returns (bytes32) {
+        require(tile < TILE_COUNT, "pack");
+        return packAttackDataAgainst(tile, troopCount, holder[tile]);
+    }
+
+    /// @notice Pack an attack payload with an explicit expected defender (0 for an unheld tile).
+    function packAttackDataAgainst(uint256 tile, uint256 troopCount, uint256 defender) public pure returns (bytes32) {
+        require(tile < TILE_COUNT && troopCount < 2 ** 128 && defender < 2 ** 64, "pack");
+        return bytes32((tile << 192) | (defender << 128) | troopCount);
+    }
+
+    /// @notice Pack the payload of a KIND_REINFORCE proposal: tile (bits 192..255) | troops.
+    function packReinforceData(uint256 tile, uint256 troopCount) public pure returns (bytes32) {
         require(tile < TILE_COUNT && troopCount < 2 ** 128, "pack");
-        return bytes32((tile << 128) | troopCount);
+        return bytes32((tile << 192) | troopCount);
     }
 
-    function unpackAttackData(bytes32 data) public pure returns (uint256 tile, uint256 troopCount) {
-        tile = uint256(data) >> 128;
+    function unpackAttackData(bytes32 data) public pure returns (uint256 tile, uint256 defender, uint256 troopCount) {
+        tile = uint256(data) >> 192;
+        defender = (uint256(data) >> 128) & (2 ** 64 - 1);
         troopCount = uint256(data) & (2 ** 128 - 1);
     }
 
-    /// @notice Declare a voted attack in the current epoch, committing the troops now.
+    /// @notice Declare a voted attack in the current epoch, committing the troops now. The tile
+    /// must still be held by the defender the proposal was voted against, and a proposal older
+    /// than an active pact with that defender cannot be used to break the pact.
     function declareAttack(uint256 proposalId) external returns (uint256 attackId) {
         uint256 epoch = _requireSettled();
         IGuilds.Proposal memory p = guilds.proposal(proposalId);
@@ -259,12 +300,18 @@ contract Realm {
         if (proposalUsed[proposalId]) revert ProposalUsed();
         uint256 guildId = p.guild;
         if (!guilds.isMember(guildId, msg.sender)) revert NotMember();
+        if (!guilds.isLive(proposalId)) revert ProposalExpired();
         if (!guilds.hasMajority(proposalId)) revert NoMajority();
-        (uint256 tile, uint256 force) = unpackAttackData(p.data);
+        (uint256 tile, uint256 expected, uint256 force) = unpackAttackData(p.data);
         if (tile >= TILE_COUNT) revert BadTile();
         if (force == 0) revert ZeroAmount();
         uint256 defender = holder[tile];
         if (defender == guildId) revert OwnTile();
+        if (defender != expected) revert WrongDefender();
+        if (defender != 0) {
+            uint256 pactRef = diplomacy.activePactBetween(guildId, defender);
+            if (pactRef != 0 && p.createdAt < diplomacy.pact(pactRef - 1).signedAt) revert ProposalPredatesPact();
+        }
         if (hasAttacked[epoch][guildId][tile]) revert AlreadyAttacking();
         if (_tileAttacks[epoch][tile].length >= MAX_ATTACKS_PER_TILE) revert TileCrowded();
         if (troops[guildId] < force) revert InsufficientTroops();
@@ -440,13 +487,7 @@ contract Realm {
 
     /// @notice Pay the guild treasury out equally to current members after a KIND_DISTRIBUTE vote.
     function distributeTreasury(uint256 proposalId) external {
-        IGuilds.Proposal memory p = guilds.proposal(proposalId);
-        if (p.kind != GUILD_KIND_DISTRIBUTE) revert WrongKind();
-        if (proposalUsed[proposalId]) revert ProposalUsed();
-        uint256 guildId = p.guild;
-        if (!guilds.isMember(guildId, msg.sender)) revert NotMember();
-        if (!guilds.hasMajority(proposalId)) revert NoMajority();
-        proposalUsed[proposalId] = true;
+        (uint256 guildId,) = _consumeProposal(proposalId, GUILD_KIND_DISTRIBUTE);
         _harvest(guildId);
         address[] memory members = guilds.membersOf(guildId);
         uint256 each = treasury[guildId] / members.length;
@@ -542,6 +583,20 @@ contract Realm {
 
     function _requireMember(uint256 guildId) private view {
         if (!guilds.isMember(guildId, msg.sender)) revert NotMember();
+    }
+
+    /// @dev Check that `proposalId` is an unused, unexpired proposal of `kind` that the caller's
+    /// guild passed, and mark it used. Returns the guild and the payload.
+    function _consumeProposal(uint256 proposalId, uint8 kind) private returns (uint256 guildId, bytes32 data) {
+        IGuilds.Proposal memory p = guilds.proposal(proposalId);
+        if (p.kind != kind) revert WrongKind();
+        if (proposalUsed[proposalId]) revert ProposalUsed();
+        guildId = p.guild;
+        if (!guilds.isMember(guildId, msg.sender)) revert NotMember();
+        if (!guilds.isLive(proposalId)) revert ProposalExpired();
+        if (!guilds.hasMajority(proposalId)) revert NoMajority();
+        proposalUsed[proposalId] = true;
+        data = p.data;
     }
 
     function _requireSettled() private view returns (uint256 epoch) {

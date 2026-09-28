@@ -7,7 +7,9 @@ import {
     GUILD_KIND_EXPEL,
     GUILD_KIND_ATTACK,
     GUILD_KIND_PACT,
-    GUILD_KIND_DISTRIBUTE
+    GUILD_KIND_DISTRIBUTE,
+    GUILD_KIND_BUY_TROOPS,
+    GUILD_KIND_REINFORCE
 } from "../src/interfaces/IGuilds.sol";
 
 contract GuildsTest is PactsBase {
@@ -137,7 +139,7 @@ contract GuildsTest is PactsBase {
         guilds.propose(0, bytes32(0));
         vm.prank(alice);
         vm.expectRevert(Guilds.InvalidKind.selector);
-        guilds.propose(5, bytes32(0));
+        guilds.propose(7, bytes32(0));
         vm.prank(alice);
         vm.expectRevert(Guilds.NoSuchProposal.selector);
         guilds.vote(99, true);
@@ -199,6 +201,47 @@ contract GuildsTest is PactsBase {
         assertEq(guilds.KIND_ATTACK(), GUILD_KIND_ATTACK);
         assertEq(guilds.KIND_PACT(), GUILD_KIND_PACT);
         assertEq(guilds.KIND_DISTRIBUTE(), GUILD_KIND_DISTRIBUTE);
+        assertEq(guilds.KIND_BUY_TROOPS(), GUILD_KIND_BUY_TROOPS);
+        assertEq(guilds.KIND_REINFORCE(), GUILD_KIND_REINFORCE);
+    }
+
+    function test_joinedAtIsRecordedAndResetOnRejoin() public {
+        _found(alice, "Alpha");
+        assertEq(guilds.joinedAt(1, alice), block.timestamp);
+        vm.warp(block.timestamp + 100);
+        _join(bob, 1);
+        assertEq(guilds.joinedAt(1, bob), block.timestamp);
+        assertEq(guilds.joinedAt(1, carol), 0);
+        vm.prank(bob);
+        guilds.leave();
+        assertEq(guilds.joinedAt(1, bob), 0);
+        vm.warp(block.timestamp + 100);
+        _join(bob, 1);
+        assertEq(guilds.joinedAt(1, bob), block.timestamp, "rejoining starts over");
+    }
+
+    function test_proposalsExpireAfterLifetime() public {
+        _found(alice, "Alpha");
+        _join(bob, 1);
+        _join(carol, 1);
+        assertFalse(guilds.isLive(1), "unknown proposal");
+        uint256 id = _propose(alice, GUILD_KIND_EXPEL, bytes32(uint256(uint160(carol))));
+        _vote(bob, id, true);
+        assertTrue(guilds.isLive(id));
+        vm.warp(block.timestamp + guilds.PROPOSAL_LIFETIME() - 1);
+        assertTrue(guilds.isLive(id));
+        vm.warp(block.timestamp + 1);
+        assertFalse(guilds.isLive(id));
+        assertTrue(guilds.hasMajority(id), "expiry is separate from the vote count");
+        vm.prank(alice);
+        vm.expectRevert(Guilds.ProposalExpired.selector);
+        guilds.executeExpel(id);
+        assertEq(guilds.guildOf(carol), 1);
+        uint256 again = _propose(alice, GUILD_KIND_EXPEL, bytes32(uint256(uint160(carol))));
+        _vote(bob, again, true);
+        vm.prank(alice);
+        guilds.executeExpel(again);
+        assertEq(guilds.guildOf(carol), 0);
     }
 
     function testFuzz_majorityThreshold(uint8 membersSeed, uint8 yesSeed) public {

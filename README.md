@@ -42,8 +42,8 @@ caller. The three created contracts are fully configured by their constructors, 
 role, contain no `DELEGATECALL`/`CALLCODE`/`SELFDESTRUCT`, and are covered by the same tests as
 the manifest contracts (`test/Launch.t.sol` runs the floor's runtime checks on all six).
 
-Realm's init code is about 35.5 KB including constructor arguments, under the 48 KB EIP-3860 cap
-(`test_initCodeUnderEip3860Limit`).
+Realm's init code is about 38 KB including constructor arguments, under the 48 KB EIP-3860 cap
+(`test_initCodeUnderEip3860Limit`); its runtime is 13.6 KB.
 
 ## Launch manifest guidance
 
@@ -63,9 +63,8 @@ payable and none needs ETH. All constructor argument types are `address` or `uin
 ```json
 {
   "contracts": [
-    { "name": "Guilds", "contract": "Guilds", "constructorArgs": [] },
+    { "contract": "Guilds", "constructorArgs": [] },
     {
-      "name": "Realm",
       "contract": "Realm",
       "constructorArgs": ["$token", "$contract:Guilds", "3600", "604800", "1000000000000000000", "1000"]
     }
@@ -86,25 +85,35 @@ season `s` covers epochs `s*168 … s*168+167`. `currentEpoch()`, `currentSeason
 ### Guilds and votes (`Guilds`)
 
 * Anyone founds a guild (`found(name)`) or joins one (`join(id)`); a player belongs to at most one
-  guild and a guild holds at most 32 members.
+  guild and a guild holds at most 32 members. `joinedAt(guild, member)` records when each current
+  member joined (reset on every join) and is what `Season` uses to decide who earned a prize.
 * Every guild action is a proposal: `propose(kind, data)` by a member (the proposer votes yes),
   `vote(id, support)` by members, votes may be changed. A proposal passes while **more than half of
   the guild's current members** have voted yes; the count is recomputed among current members at
   execution, so leavers and expelled members stop counting.
-* Kinds: `1` expel (`data = address`), `2` attack, `3` pact, `4` distribute treasury. Expulsions
-  execute in `Guilds` (`executeExpel`) and ban the member from rejoining that guild. The other kinds
-  are executed by `Realm` or `Diplomacy`, which each mark a proposal used so it executes once.
-* Payload layouts: attack `bytes32((tile << 128) | troops)` (`Realm.packAttackData`); pact
-  `partner (32 bits) | duration in epochs (32 bits) | own bond (96 bits) | partner bond (96 bits)`
-  (`Diplomacy.packPactData`).
+* **Proposals expire.** A proposal is executable only within `PROPOSAL_LIFETIME` (one day) of its
+  creation (`isLive(id)`); every executor (`executeExpel`, `Realm`, `Diplomacy`) refuses an expired
+  one. An approval given under one state of the game cannot be consumed long after it changed.
+* Kinds: `1` expel (`data = address`), `2` attack, `3` pact, `4` distribute treasury, `5` buy
+  troops from the treasury (`data = count`), `6` reinforce a tile. Expulsions execute in `Guilds`
+  (`executeExpel`) and ban the member from rejoining that guild. The other kinds are executed by
+  `Realm` or `Diplomacy`, which each mark a proposal used so it executes once. **A lone member can
+  only add to a guild** (buy troops with their own tokens, donate to the treasury); every move of
+  pooled troops or treasury tokens is a passed vote.
+* Payload layouts: attack `tile (bits 192..255) | expected defender guild (bits 128..191) | troops
+  (bits 0..127)` (`Realm.packAttackData(tile, troops)` binds the tile's current holder,
+  `packAttackDataAgainst` takes an explicit defender); reinforce `tile (bits 192..255) | troops`
+  (`Realm.packReinforceData`); pact `partner (32 bits) | duration in epochs (32 bits) | own bond
+  (96 bits) | partner bond (96 bits)` (`Diplomacy.packPactData`).
 
 ### Troops and money (`Realm`)
 
 * `buyTroops(guild, count)`: a member pays `count * troopPrice` PACT. `feeBps` of it is
   transferred to `Season` for the current season's prize pool; the rest joins the current epoch's
   **income pool**. Troops are pooled per guild.
-* `buyTroopsFromTreasury(guild, count)` buys with the guild treasury (same fee), and
-  `fundTreasury(guild, amount)` lets a member donate to the treasury, for example to back a bond.
+* `buyTroopsFromTreasury(proposalId)` executes a passed **buy-troops** proposal (kind 5, payload
+  = count) with the guild treasury (same fee). `fundTreasury(guild, amount)` lets a member donate
+  to the treasury, for example to back a bond.
 * At settlement of epoch `e`, its income pool (plus anything carried while nobody held tiles) is
   shared per tile among the guilds holding tiles at that moment, before the epoch's battles are
   resolved. Each tile receives a whole number of token minor units, rounded down. The uncredited
@@ -118,12 +127,18 @@ season `s` covers epochs `s*168 … s*168+167`. `currentEpoch()`, `currentSeason
 ### Map, attacks and settlement (`Realm`)
 
 * 144 tiles, index `row*12 + col`, unheld at launch (`holder(tile) == 0`). Each held tile has a
-  garrison. `reinforce(tile, count)` moves troops from the pool onto a tile the guild holds;
-  garrisons stay until the tile is fought over.
-* `declareAttack(proposalId)`: a member executes a passed attack proposal in the current epoch.
-  The troops are committed immediately and the attack is public (`AttackDeclared`). A guild can
-  attack a given tile once per epoch, never its own tile, and at most 64 attacks can target one
-  tile in an epoch.
+  garrison. `reinforce(proposalId)` executes a passed **reinforce** proposal (kind 6), moving
+  troops from the pool onto a tile the guild holds; garrisons stay until the tile is fought over.
+* `declareAttack(proposalId)`: a member executes a passed, unexpired attack proposal in the
+  current epoch. The troops are committed immediately and the attack is public
+  (`AttackDeclared`). A guild can attack a given tile once per epoch, never its own tile, and at
+  most 64 attacks can target one tile in an epoch.
+* **The vote binds the defender.** The payload names the guild expected to hold the tile (0 for an
+  empty tile); `declareAttack` reverts `WrongDefender` if the holder changed since the vote, so an
+  approval to take an empty or enemy tile cannot be fired at whoever holds it later.
+* **Breaking a pact needs a knowing vote.** If the target's holder is an active pact partner, the
+  proposal must have been created after the pact was signed (`ProposalPredatesPact` otherwise), so
+  an attack voted before the pact existed cannot be turned into a betrayal by one member.
 * Attacks and reinforcements require all previous epochs to be settled (`settledEpoch ==
   currentEpoch()`), so declarations always see the true holder.
 * All attacks on a tile resolve together when the epoch is settled. With garrison `D` and attacker
@@ -139,10 +154,15 @@ season `s` covers epochs `s*168 … s*168+167`. `currentEpoch()`, `currentSeason
 
 ### Pacts (`Diplomacy`)
 
-* Two guilds pass mirrored pact proposals (partner, duration, own bond, partner bond). A member of
-  either guild calls `signPact(proposalA, proposalB)`; both bonds are locked out of the guild
-  treasuries in `Realm`. The pact runs from the signing epoch for `duration` epochs. One unsettled
-  pact per pair.
+* Two guilds pass mirrored pact proposals (partner, duration, own bond, partner bond). Each bond is
+  at least one troop's price (`troopPrice`), so every pact carries a stake. A member of either
+  guild calls `signPact(proposalA, proposalB)` while both proposals are unexpired; both bonds are
+  locked out of the guild treasuries in `Realm`. The pact runs from the signing epoch for
+  `duration` epochs. One unsettled pact per pair. The signing timestamp is stored (`signedAt`).
+* **No signing over an attack in flight.** If either guild has declared an attack on the other's
+  tile in the signing epoch, `signPact` reverts `AttackInFlight`; that attack would resolve inside
+  the window, so the pact can only be signed once the epoch has ended. Every attack on a partner
+  from the signing onwards is therefore a betrayal.
 * **Betrayal** is declaring an attack on a tile the partner holds (holder at declaration) during
   the window. `Realm` logs every attack on a held tile; `Diplomacy` reads the log after the
   signing snapshot. If both guilds attack each other, only the earlier attack is a betrayal (the
@@ -162,15 +182,19 @@ season `s` covers epochs `s*168 … s*168+167`. `currentEpoch()`, `currentSeason
   `PreviousSeasonNotClosed` reverts. This ensures all incoming rollover is included before prizes
   are calculated. Guilds are ranked by tiles held
   at season end (`Realm.tilesAtSeasonEnd`), ties in favour of the earlier-founded guild.
-* Ranks 1–3 receive 50/30/20% of the pool, each split equally among the members the guild had at
-  closing. Members claim with `claimPrize(s)` and receive a victory banner, including when the
-  token prize is zero because the pool is empty or the per-member share rounds down to zero.
-  `claimRank(s, member)` records unclaimed banner eligibility independently of `claimable` and is
-  cleared before payment and minting, so each winning member can claim only once. Unassigned amounts
-  (missing rank, memberless guild, rounding) roll into the next season's pool.
-* `claimHonourBanner(s, guild)`: any current member of a guild founded before the season ended,
-  that was party to at least one pact overlapping the season and broke none, mints the guild's
-  honour banner (one per guild per season) to themselves.
+* Ranks 1–3 receive 50/30/20% of the pool, each split equally among the members the guild has at
+  closing **who joined it before the season ended** (`Guilds.joinedAt < Realm.seasonEndTime(s)`).
+  Closing always happens after the end, so wallets joining in between earn nothing and cannot
+  dilute the members who played. Members claim with `claimPrize(s)` and receive a victory banner,
+  including when the token prize is zero because the pool is empty or the per-member share rounds
+  down to zero. `claimRank(s, member)` records unclaimed banner eligibility independently of
+  `claimable` and is cleared before payment and minting, so each winning member can claim only
+  once. Unassigned amounts (missing rank, no eligible member, rounding) roll into the next
+  season's pool.
+* `claimHonourBanner(s, guild)`: a current member who joined the guild before the season ended,
+  of a guild that was party to at least one pact overlapping the season and broke none, mints the
+  guild's honour banner (one per guild per season) to themselves. Leaving and rejoining resets the
+  join time, so a rejoiner after the end cannot claim.
 
 ### Banners
 
@@ -180,7 +204,9 @@ ERC-721 "Pacts Banner" / "BANNER". `mint` is restricted to `Season`. `banner(id)
 ## Events for the frontend
 
 `Guilds`: `GuildFounded`, `MemberJoined`, `MemberLeft`, `MemberExpelled`, `ProposalCreated`,
-`VoteCast`. `Realm`: `TroopsBought`, `TreasuryFunded`, `Reinforced`, `AttackDeclared`,
+`VoteCast`. `Realm`: `TroopsBought` (its last field is the proposal id of a treasury purchase, 0
+for a purchase with the buyer's own tokens), `TreasuryFunded`, `Reinforced` (carries the proposal
+id), `AttackDeclared`,
 `AttackResolved`, `TileResolved`, `IncomeDistributed`, `EpochSettled`, `IncomeHarvested`,
 `TreasuryDistributed`, `BondLocked`, `BondReleased`, `BondSlashed`. `Diplomacy`: `PactSigned`,
 `PactBroken`, `PactExpired`. `Season`: `FeeRecorded`, `SeasonClosed`, `PrizeClaimed`,
@@ -195,6 +221,7 @@ give current state without replaying logs.
 | player | `Realm` | `buyTroops`, `fundTreasury` |
 | `Realm` | `Season` | fee share of every purchase |
 | `Realm` | guild members | `distributeTreasury` after a majority vote |
+| `Realm` | `Season` | fee share of `buyTroopsFromTreasury` after a majority vote |
 | `Season` | winning members | `claimPrize` |
 
 Bonds and slashes move balances between guild treasuries inside `Realm`. `Realm` holds exactly
@@ -226,7 +253,15 @@ banners, solvency of `Realm`, and the launch floor (supply untouched by construc
 sizes, forbidden opcodes, init code size, CREATE2 deployment) for all six contracts.
 Revision regressions cover chronological closing with partially closed seasons, zero-value victory
 claims, income remainder conservation through idle epochs and ownership changes, and identical
-bond payouts with or without an early settlement attempt in the betrayal epoch.
+bond payouts with or without an early settlement attempt in the betrayal epoch. The second
+revision adds: a lone member cannot spend the treasury or commit the troop pool
+(`test_loneMemberCannotSpendTreasuryWithoutVote`, `test_loneMemberCannotReinforceWithoutVote`),
+attack votes bound to the defender and expiring (`test_attackProposalBoundToDefenderAndExpires`),
+old votes unable to break a later pact (`test_attackVotedBeforePactCannotBreakIt`), signing
+refused over an in-flight attack (`test_signPactRefusedWhileAttackOnPartnerIsInFlight`), minimum
+bonds, expiring pact offers and expulsions, and post-season joiners excluded from prizes and
+honour banners (`test_membersJoiningAfterSeasonEndBeforeCloseGetNothing`,
+`test_honourBannerRequiresMembershipBeforeSeasonEnd`).
 
 ## Deployment and operations
 
@@ -246,19 +281,34 @@ bond payouts with or without an early settlement attempt in the betrayal epoch.
 
 ## Assumptions and known limitations
 
-* **Open membership.** Anyone can join a guild that has room. A hostile wallet can join to dilute
-  votes or to take a share of a prize claimed after it joined; the only defence is expulsion by
-  majority (and the ban that follows) or keeping the guild full. Prize shares are fixed at closing,
-  so joining after `close` earns nothing.
-* **Open reinforcement.** Holders may reinforce a tile until the epoch ends, after attacks have
-  been declared. This is a feature of open declarations, not a bug.
-* **Attacks in flight when a pact is signed** (declared earlier in the same epoch) are not
-  betrayals; the log snapshot excludes them.
-* **Honour banners** require at least one pact overlapping the season; a guild without pacts
-  earns none. Betrayal is judged by declaration epoch, which is final once the season has ended.
+* **Open membership is the game's main trust assumption.** Anyone can join a guild that has room,
+  and every member has one vote from the moment they join, as the brief requires. A joiner alone
+  can do nothing with the guild's troops, treasury or bonds: every such move is a majority vote,
+  attack votes are bound to the defender and all votes expire after a day. But `k+1` fresh wallets
+  joining a guild of `k` members hold the majority immediately and can expel the founders, pay
+  the treasury to themselves (`distributeTreasury`), sign pacts that lock its bonds or throw its
+  troops away. Expulsion is a defence only while the original members are still the majority;
+  the other defences are keeping the guild full (32 members) and not accumulating a large
+  treasury. **The first wallet to join a memberless guild is a 1-of-1 majority and can withdraw
+  everything the guild holds.** A guild whose members all leave should distribute first. Prize
+  shares are fixed at closing among members who joined before the season ended, so joining after
+  the end earns nothing.
+* **Reinforcement timing.** Holders may (by vote) reinforce a tile until the epoch ends, after
+  attacks have been declared. This is a feature of open declarations, not a bug.
+* **Honour banners** require at least one pact overlapping the season backed by at least one
+  troop's price per side; a guild without pacts earns none. Two guilds controlled by one player
+  can still earn honour banners by signing a one-epoch pact each season at the cost of locking
+  the minimum bond; the banner is a trophy with no token value. Betrayal is judged by declaration
+  epoch, which is final once the season has ended.
+* **Pacts while a betrayal is unsettled.** Until `settlePact` runs after a betrayal, the pact still
+  counts as active for the `ProposalPredatesPact` check, so a retaliation must use a proposal
+  created after the pact was signed (the usual case) or wait for the settlement, which anyone can
+  trigger once the betrayal epoch has ended.
 * **Memberless guilds** keep their tiles, income and treasury; nobody can withdraw until someone
-  joins. Prize shares for a memberless winner roll over.
+  joins. Prize shares for a winner with no eligible member roll over.
 * **Unbounded pact duration** is allowed; bonds stay locked until expiry or betrayal.
+* **Proposal lifetime** is one day of wall-clock time (24 epochs at the launch parameters). It is
+  a `Guilds` constant, independent of Realm's epoch length.
 * Delayed season closings must be caught up in chronological order, including empty seasons.
   Closing one season never requires its winners to claim before the next can close.
 * Tests are not an audit. The game holds player funds and needs the independent adversarial

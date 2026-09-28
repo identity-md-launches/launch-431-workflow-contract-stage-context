@@ -126,6 +126,65 @@ contract SeasonTest is PactsBase {
         season.claimPrize(0);
     }
 
+    /// @dev Regression: closing runs after the season ended, so wallets that join a winning guild
+    /// between the end and the close never earned a share and must not dilute those who did.
+    function test_membersJoiningAfterSeasonEndBeforeCloseGetNothing() public {
+        _playSeasonZero();
+        vm.warp(GENESIS + SEASON - 1);
+        _join(frank, 1); // joins Alpha one second before the end: earns a share
+        _endSeasonZero();
+        assertEq(guilds.joinedAt(1, frank), realm.seasonEndTime(0) - 1);
+        address[] memory sybils = new address[](29);
+        for (uint256 i; i < sybils.length; ++i) {
+            sybils[i] = address(uint160(0x4000 + i));
+            _join(sybils[i], 1);
+        }
+        address late = makeAddr("late");
+        _join(late, 2);
+        assertEq(guilds.memberCount(1), 32);
+        vm.prank(sybils[0]);
+        season.close(0, 100);
+        Season.Result memory r = season.result(0);
+        uint256 first = 20e18;
+        uint256 each = first / 3;
+        assertEq(r.winners[0], 1);
+        assertEq(r.prizes[0], each * 3);
+        assertEq(season.claimable(0, alice), each);
+        assertEq(season.claimable(0, bob), each);
+        assertEq(season.claimable(0, frank), each);
+        assertEq(season.claimRank(0, frank), 1);
+        for (uint256 i; i < sybils.length; ++i) {
+            assertEq(season.claimable(0, sybils[i]), 0);
+            assertEq(season.claimRank(0, sybils[i]), 0);
+            vm.prank(sybils[i]);
+            vm.expectRevert(Season.NothingToClaim.selector);
+            season.claimPrize(0);
+        }
+        assertEq(r.prizes[1], 12e18, "Beta's prize is carol's alone");
+        assertEq(season.claimable(0, carol), 12e18);
+        assertEq(season.claimable(0, late), 0);
+        assertEq(r.rollover, first - each * 3);
+        vm.prank(frank);
+        season.claimPrize(0);
+    }
+
+    function test_winnerWhoseMembersAllJoinedAfterSeasonEndRollsOver() public {
+        _found(alice, "Alpha");
+        _buy(alice, 1, 100);
+        _attack(alice, 0, 10);
+        _endSeasonZero();
+        vm.prank(alice);
+        guilds.leave();
+        _join(frank, 1);
+        season.close(0, 10);
+        Season.Result memory r = season.result(0);
+        assertEq(r.winners[0], 1);
+        assertEq(r.prizes[0], 0);
+        assertEq(r.rollover, 10e18);
+        assertEq(season.claimable(0, frank), 0);
+        assertEq(season.claimRank(0, frank), 0);
+    }
+
     function test_memberLeavingAfterCloseStillClaims() public {
         _playSeasonZero();
         _endSeasonZero();
@@ -408,16 +467,35 @@ contract SeasonTest is PactsBase {
         season.claimHonourBanner(0, 1);
     }
 
-    function test_honourBannerRequiresGuildFoundedBeforeSeasonEnd() public {
+    function test_honourBannerRequiresMembershipBeforeSeasonEnd() public {
         _playSeasonZero();
         _pactBetweenAlphaAndBeta(2);
         _endSeasonZero();
+        // a guild founded after the end has no member who was there before it
         vm.prank(bob);
         guilds.leave();
         _found(bob, "New");
         vm.prank(bob);
-        vm.expectRevert(Season.GuildTooYoung.selector);
+        vm.expectRevert(Season.JoinedAfterSeason.selector);
         season.claimHonourBanner(0, 5);
+        // a wallet joining an honourable guild after the end cannot take its banner
+        _join(frank, 2);
+        vm.prank(frank);
+        vm.expectRevert(Season.JoinedAfterSeason.selector);
+        season.claimHonourBanner(0, 2);
+        assertFalse(season.honourClaimed(0, 2));
+        vm.prank(carol);
+        uint256 id = season.claimHonourBanner(0, 2);
+        assertEq(banners.ownerOf(id), carol);
+        // bob left Alpha after the end and rejoined: his membership is new
+        vm.prank(bob);
+        guilds.leave();
+        _join(bob, 1);
+        vm.prank(bob);
+        vm.expectRevert(Season.JoinedAfterSeason.selector);
+        season.claimHonourBanner(0, 1);
+        vm.prank(alice);
+        season.claimHonourBanner(0, 1);
     }
 
     function test_seasonHelpers() public view {

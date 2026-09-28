@@ -13,8 +13,8 @@ import {Banners} from "./Banners.sol";
 /// and reports it through {recordFee}. After the last epoch of a season is settled anyone can
 /// {close} it, in chunks of guilds, ranking guilds by tiles held at season end. The top three
 /// guilds split the pool 50/30/20, each share divided equally among the members the guild had at
-/// closing. Unassigned shares roll into the next season. Season creates and is the only minter
-/// of Banners.
+/// closing who joined it before the season ended. Unassigned shares roll into the next season.
+/// Season creates and is the only minter of Banners.
 contract Season {
     uint256 public constant FIRST_SHARE = 50;
     uint256 public constant SECOND_SHARE = 30;
@@ -70,7 +70,7 @@ contract Season {
     error NothingToClaim();
     error AlreadyClaimed();
     error NotMember();
-    error GuildTooYoung();
+    error JoinedAfterSeason();
     error NoPactHeld();
     error PactWasBroken();
     error TransferFailed();
@@ -137,12 +137,15 @@ contract Season {
         Result storage r = _results[season];
         uint256 pool = prizePool[season];
         uint256 rollover = pool;
+        uint256 seasonEnd = realm.seasonEndTime(season);
         uint256[3] memory shares = [FIRST_SHARE, SECOND_SHARE, THIRD_SHARE];
         for (uint256 rank; rank < 3; ++rank) {
             uint256 guildId = c.top[rank];
             if (guildId == 0) continue;
             r.winners[rank] = uint64(guildId);
-            address[] memory members = guilds.membersOf(guildId);
+            // Only members who joined before the season ended earned a share; closing runs after
+            // the end, so wallets joining in between get nothing.
+            address[] memory members = _eligibleMembers(guildId, seasonEnd);
             if (members.length == 0) continue;
             uint256 each = (pool * shares[rank] / 100) / members.length;
             for (uint256 m; m < members.length; ++m) {
@@ -157,6 +160,18 @@ contract Season {
         r.rollover = rollover;
         if (rollover != 0) prizePool[season + 1] += rollover;
         emit SeasonClosed(season, r.winners, r.prizes, rollover);
+    }
+
+    function _eligibleMembers(uint256 guildId, uint256 seasonEnd) private view returns (address[] memory eligible) {
+        address[] memory members = guilds.membersOf(guildId);
+        uint256 n;
+        for (uint256 i; i < members.length; ++i) {
+            if (guilds.joinedAt(guildId, members[i]) < seasonEnd) members[n++] = members[i];
+        }
+        assembly ("memory-safe") {
+            mstore(members, n)
+        }
+        eligible = members;
     }
 
     // ---------------------------------------------------------------- claims
@@ -176,12 +191,14 @@ contract Season {
     }
 
     /// @notice Claim the honour banner of a guild that held at least one pact during an ended
-    /// season and broke none. Any current member may claim it; it is minted to the caller.
+    /// season and broke none. Any member who belonged to the guild before the season ended may
+    /// claim it; it is minted to the caller.
     function claimHonourBanner(uint256 season, uint256 guildId) external returns (uint256 tokenId) {
         if (!seasonEnded(season)) revert SeasonNotEnded();
         if (honourClaimed[season][guildId]) revert AlreadyClaimed();
         if (!guilds.isMember(guildId, msg.sender)) revert NotMember();
-        if (guilds.guild(guildId).foundedAt >= realm.seasonEndTime(season)) revert GuildTooYoung();
+        // Implies the guild itself existed before the end: its founder joined at founding.
+        if (guilds.joinedAt(guildId, msg.sender) >= realm.seasonEndTime(season)) revert JoinedAfterSeason();
         uint256 from = firstEpoch(season);
         uint256 to = lastEpoch(season);
         if (!diplomacy.hadPactDuring(guildId, from, to)) revert NoPactHeld();
