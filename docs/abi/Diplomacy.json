@@ -1,0 +1,579 @@
+[
+  {
+    "type": "constructor",
+    "inputs": [
+      {
+        "name": "guilds_",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "activePactBetween",
+    "inputs": [
+      {
+        "name": "guildA",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "guildB",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "betrayalOf",
+    "inputs": [
+      {
+        "name": "pactId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "byA",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "epochA",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "byB",
+        "type": "bool",
+        "internalType": "bool"
+      },
+      {
+        "name": "epochB",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "betrayedDuring",
+    "inputs": [
+      {
+        "name": "guildId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "fromEpoch",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "toEpoch",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "guilds",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IGuilds"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "hadPactDuring",
+    "inputs": [
+      {
+        "name": "guildId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "fromEpoch",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "toEpoch",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "isActive",
+    "inputs": [
+      {
+        "name": "pactId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "packPactData",
+    "inputs": [
+      {
+        "name": "partner",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "durationEpochs",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "ownBond",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "partnerBond",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "function",
+    "name": "pact",
+    "inputs": [
+      {
+        "name": "pactId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct Diplomacy.Pact",
+        "components": [
+          {
+            "name": "guildA",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "guildB",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "startEpoch",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "endEpoch",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "settled",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "brokenBy",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "bondA",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "bondB",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "logAB",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "logBA",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "pactCount",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "pactsOf",
+    "inputs": [
+      {
+        "name": "guildId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "proposalUsed",
+    "inputs": [
+      {
+        "name": "proposalId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "realm",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IRealm"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "settlePact",
+    "inputs": [
+      {
+        "name": "pactId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "signPact",
+    "inputs": [
+      {
+        "name": "proposalA",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "proposalB",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "pactId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "unpackPactData",
+    "inputs": [
+      {
+        "name": "data",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "partner",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "durationEpochs",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "ownBond",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "partnerBond",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "event",
+    "name": "PactBroken",
+    "inputs": [
+      {
+        "name": "pactId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "betrayer",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "victim",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "epoch",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "slashed",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PactExpired",
+    "inputs": [
+      {
+        "name": "pactId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "bondA",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "bondB",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PactSigned",
+    "inputs": [
+      {
+        "name": "pactId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "guildA",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "guildB",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "bondA",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "bondB",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "startEpoch",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "endEpoch",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "proposalA",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "proposalB",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "AlreadySettled",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "BadDuration",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoMajority",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoSuchPact",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotMember",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "PactExists",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "PactStillActive",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ProposalUsed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "SamePartner",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TermsMismatch",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "WrongKind",
+    "inputs": []
+  }
+]
