@@ -623,6 +623,11 @@
   },
   {
     "type": "error",
+    "name": "PreviousSeasonNotClosed",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "SeasonNotEnded",
     "inputs": []
   },

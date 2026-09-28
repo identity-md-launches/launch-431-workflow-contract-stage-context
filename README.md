@@ -107,7 +107,10 @@ season `s` covers epochs `s*168 … s*168+167`. `currentEpoch()`, `currentSeason
   `fundTreasury(guild, amount)` lets a member donate to the treasury, for example to back a bond.
 * At settlement of epoch `e`, its income pool (plus anything carried while nobody held tiles) is
   shared per tile among the guilds holding tiles at that moment, before the epoch's battles are
-  resolved. Income accrues as `pendingIncome(guild)` and is moved to `treasury(guild)` by
+  resolved. Each tile receives a whole number of token minor units, rounded down. The uncredited
+  remainder (less than the number of held tiles) carries into future epochs; it is never also
+  credited to the accumulator. Idle epochs cannot turn that remainder into extra income.
+  Income accrues as `pendingIncome(guild)` and is moved to `treasury(guild)` by
   `harvest` or automatically whenever the guild's tile count changes or the treasury is spent.
 * A passed **distribute** proposal (`distributeTreasury`) pays the treasury out equally to the
   guild's current members. That, and the fee to `Season`, are the only ways tokens leave `Realm`.
@@ -144,18 +147,26 @@ season `s` covers epochs `s*168 … s*168+167`. `currentEpoch()`, `currentSeason
   the window. `Realm` logs every attack on a held tile; `Diplomacy` reads the log after the
   signing snapshot. If both guilds attack each other, only the earlier attack is a betrayal (the
   later is retaliation); attacks in the same epoch by both count for both.
-* `settlePact(id)`: anyone, any time after a betrayal or once the window has passed. A betrayer's
-  bond goes to the victim's treasury; an unbroken pact returns both bonds. The outcome does not
-  depend on who calls or when, which is what "automatic" means without an admin or keeper role.
+* `settlePact(id)`: anyone, once the first betrayal epoch has ended or the window has passed
+  unbroken. Calls during the betrayal epoch revert `PactStillActive`, keeping both bonds locked
+  until all same-epoch declarations are final. Realm need not have settled that epoch's battles.
+  A betrayer's bond goes to the victim's treasury; an unbroken pact returns both bonds. The outcome
+  does not depend on who calls or when, which is what "automatic" means without an admin or keeper role.
 
 ### Seasons and prizes (`Season`)
 
-* The prize pool of season `s` is the sum of fees paid during it.
+* The prize pool of season `s` is the sum of fees paid during it plus rollover from season `s-1`.
 * After the season's last epoch is settled, anyone calls `close(s, maxGuilds)` until the season is
-  closed (chunked over the guilds that existed at the first call). Guilds are ranked by tiles held
+  closed (chunked over the guilds that existed at the first call). Seasons close in order starting
+  at zero: even the first chunk requires the previous season to be fully closed, otherwise
+  `PreviousSeasonNotClosed` reverts. This ensures all incoming rollover is included before prizes
+  are calculated. Guilds are ranked by tiles held
   at season end (`Realm.tilesAtSeasonEnd`), ties in favour of the earlier-founded guild.
 * Ranks 1–3 receive 50/30/20% of the pool, each split equally among the members the guild had at
-  closing. Members claim with `claimPrize(s)` and receive a victory banner. Unassigned amounts
+  closing. Members claim with `claimPrize(s)` and receive a victory banner, including when the
+  token prize is zero because the pool is empty or the per-member share rounds down to zero.
+  `claimRank(s, member)` records unclaimed banner eligibility independently of `claimable` and is
+  cleared before payment and minting, so each winning member can claim only once. Unassigned amounts
   (missing rank, memberless guild, rounding) roll into the next season's pool.
 * `claimHonourBanner(s, guild)`: any current member of a guild founded before the season ended,
   that was party to at least one pact overlapping the season and broke none, mints the guild's
@@ -188,8 +199,9 @@ give current state without replaying logs.
 
 Bonds and slashes move balances between guild treasuries inside `Realm`. `Realm` holds exactly
 the sum of treasuries, locked bonds, unharvested income, unsettled income pools and the carried
-remainder (`_assertRealmSolvent` in the tests), except for wei-level rounding dust that stays in
-the contract.
+remainder (`_assertRealmSolvent` in the tests). Income rounding stays in the carried remainder;
+treasury payout rounding stays in the guild's treasury. Unsolicited direct token transfers are
+outside this accounting.
 
 ## Building and testing (offline)
 
@@ -205,13 +217,16 @@ uses `mcopy`; Sepolia is post-Cancun), `bytecode_hash = "none"`, no ffi and no f
 permissions. Dependencies are vendored as plain files under `lib/` (forge-std, OpenZeppelin
 Contracts 5.7.0). Tests read no environment variables and run in any order.
 
-The suite (80 tests, including fuzz tests) covers token supply and transfer, membership and
+The suite (including fuzz tests) covers token supply and transfer, membership and
 majority arithmetic, expulsion and bans, fee/income split, attack authorisation, settlement with
 several attackers on one tile including ties and proportional losses, chunked settlement, income
 distribution and carry-over, treasury distribution, bond locking, betrayal slashing, retaliation
 and mutual betrayal, pact expiry, season closing and ranking, prize claims and rollover, honour
 banners, solvency of `Realm`, and the launch floor (supply untouched by constructors, runtime
 sizes, forbidden opcodes, init code size, CREATE2 deployment) for all six contracts.
+Revision regressions cover chronological closing with partially closed seasons, zero-value victory
+claims, income remainder conservation through idle epochs and ownership changes, and identical
+bond payouts with or without an early settlement attempt in the betrayal epoch.
 
 ## Deployment and operations
 
@@ -221,8 +236,9 @@ sizes, forbidden opcodes, init code size, CREATE2 deployment) for all six contra
   --broadcast` with the operator's own signer). It refuses chains other than 31337 and 11155111
   when `EXPECTED_CHAIN_ID` is set.
 * **Keepers are permissionless.** Someone must call `Realm.settle` after each epoch (attacks and
-  reinforcements are blocked until the previous epoch is settled), `Season.close` after a season
-  and `Diplomacy.settlePact` after a betrayal or expiry. Any wallet can do this; the frontend
+  reinforcements are blocked until the previous epoch is settled), `Season.close` in chronological
+  order after seasons end, and `Diplomacy.settlePact` after the betrayal epoch ends or the pact
+  expires. Any wallet can do this; the frontend
   should offer the buttons and the launch operator may run a cron. Nothing is lost if calls are
   late: settlement, closing and slashing are deterministic whenever they run.
 * Season closing iterates every guild ever founded once; use a `maxGuilds` that fits the block gas
@@ -243,7 +259,7 @@ sizes, forbidden opcodes, init code size, CREATE2 deployment) for all six contra
 * **Memberless guilds** keep their tiles, income and treasury; nobody can withdraw until someone
   joins. Prize shares for a memberless winner roll over.
 * **Unbounded pact duration** is allowed; bonds stay locked until expiry or betrayal.
-* Season closings need not be in order, but `prizePool[s+1]` only receives rollover after `s` is
-  closed.
+* Delayed season closings must be caught up in chronological order, including empty seasons.
+  Closing one season never requires its winners to claim before the next can close.
 * Tests are not an audit. The game holds player funds and needs the independent adversarial
   review before release.

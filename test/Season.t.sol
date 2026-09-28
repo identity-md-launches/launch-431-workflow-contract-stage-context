@@ -4,6 +4,7 @@ pragma solidity 0.8.26;
 import {PactsBase} from "./PactsBase.t.sol";
 import {Season} from "../src/Season.sol";
 import {Banners} from "../src/Banners.sol";
+import {Realm} from "../src/Realm.sol";
 
 contract SeasonTest is PactsBase {
     /// @dev Season 0 standings: Alpha (alice, bob) 3 tiles, Beta (carol) 2, Gamma (dave) 1,
@@ -209,6 +210,106 @@ contract SeasonTest is PactsBase {
         season.close(0, 1);
         assertTrue(season.result(0).closed);
         assertEq(season.result(0).winners[0], 0);
+    }
+
+    function test_closeRequiresPreviousSeasonFullyClosedAndPreservesRollover() public {
+        _found(alice, "Alpha");
+        _found(bob, "Beta");
+        _buy(alice, 1, 100);
+        _attack(alice, 0, 1);
+        vm.warp(GENESIS + 2 * SEASON);
+        _settleAll();
+
+        vm.expectRevert(Season.PreviousSeasonNotClosed.selector);
+        season.close(1, 2);
+        season.close(0, 1);
+        assertFalse(season.result(0).closed);
+        vm.expectRevert(Season.PreviousSeasonNotClosed.selector);
+        season.close(1, 2);
+        assertEq(season.closing(1).cursor, 0);
+        season.close(0, 1);
+        assertEq(season.prizePool(1), 5e18);
+        season.close(1, 2);
+        assertEq(season.claimable(1, alice), 2.5e18);
+        vm.startPrank(alice);
+        season.claimPrize(0);
+        season.claimPrize(1);
+        vm.stopPrank();
+        assertEq(token.balanceOf(address(season)), season.prizePool(2));
+        assertEq(season.prizePool(2), 2.5e18);
+    }
+
+    function test_zeroPoolWinnersClaimBannersExactlyOnce() public {
+        _playSeasonZero();
+        vm.warp(GENESIS + 2 * SEASON);
+        _settleAll();
+        season.close(0, 100);
+        season.close(1, 100);
+        assertEq(season.prizePool(1), 0);
+        assertEq(season.result(1).winners[2], 3);
+        uint256 poolBalance = token.balanceOf(address(season));
+
+        vm.prank(erin); // not a winning member
+        vm.expectRevert(Season.NothingToClaim.selector);
+        season.claimPrize(1);
+        _join(frank, 1);
+        vm.prank(frank); // eligibility was fixed at close
+        vm.expectRevert(Season.NothingToClaim.selector);
+        season.claimPrize(1);
+        vm.prank(bob);
+        guilds.leave(); // leaving after close does not remove eligibility
+
+        address[4] memory winners = [alice, bob, carol, dave];
+        for (uint256 i; i < winners.length; ++i) {
+            uint256 before = token.balanceOf(winners[i]);
+            uint8 rank = season.claimRank(1, winners[i]);
+            assertGt(rank, 0);
+            assertEq(season.claimable(1, winners[i]), 0);
+            vm.prank(winners[i]);
+            uint256 id = season.claimPrize(1);
+            assertEq(banners.ownerOf(id), winners[i]);
+            assertEq(banners.banner(id).rank, rank);
+            assertEq(banners.banner(id).season, 1);
+            assertEq(token.balanceOf(winners[i]), before);
+            assertEq(season.claimRank(1, winners[i]), 0);
+            vm.prank(winners[i]);
+            vm.expectRevert(Season.NothingToClaim.selector);
+            season.claimPrize(1);
+        }
+        assertEq(banners.totalMinted(), 4);
+        assertEq(token.balanceOf(address(season)), poolBalance);
+    }
+
+    function test_roundedZeroPrizeStillMintsBannerAndRollsOverTokens() public {
+        // Two troops at ten minor units apiece generate a two-unit pool. First place's
+        // one-unit share rounds to zero when split between two members.
+        realm = new Realm(address(token), address(guilds), EPOCH, SEASON, 10, FEE_BPS);
+        season = realm.season();
+        banners = season.banners();
+        vm.prank(alice);
+        token.approve(address(realm), type(uint256).max);
+        _found(alice, "Alpha");
+        _join(bob, 1);
+        _buy(alice, 1, 2);
+        uint256 p = _proposeAttack(alice, 0, 1);
+        _vote(bob, p, true);
+        vm.prank(alice);
+        realm.declareAttack(p);
+        _endSeasonZero();
+        season.close(0, 1);
+        assertEq(season.prizePool(0), 2);
+        assertEq(season.result(0).prizes[0], 0);
+        assertEq(season.prizePool(1), 2);
+        vm.prank(alice);
+        uint256 first = season.claimPrize(0);
+        vm.prank(bob);
+        uint256 second = season.claimPrize(0);
+        assertEq(banners.ownerOf(first), alice);
+        assertEq(banners.ownerOf(second), bob);
+        assertEq(token.balanceOf(address(season)), 2);
+        vm.prank(bob);
+        vm.expectRevert(Season.NothingToClaim.selector);
+        season.claimPrize(0);
     }
 
     function test_claimsNeverExceedPool() public {

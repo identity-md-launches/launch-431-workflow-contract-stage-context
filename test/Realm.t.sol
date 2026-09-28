@@ -439,6 +439,96 @@ contract RealmTest is PactsBase {
         assertEq(realm.troops(1), 3);
     }
 
+    function test_idleEpochsCannotRecreditIncomeRemainder() public {
+        _found(alice, "SevenTiles");
+        _buy(alice, 1, 10);
+        for (uint256 tile; tile < 7; ++tile) {
+            _attack(alice, tile, 1);
+        }
+        vm.warp(GENESIS + 4 * EPOCH);
+        _settleAll();
+        realm.harvest(1);
+        uint256 income = 9e18;
+        uint256 credited = income / 7 * 7;
+        assertEq(realm.treasury(1), credited);
+        assertEq(realm.carriedIncome(), income - credited);
+        _assertRealmSolvent(1, 0);
+
+        uint256 p = _propose(alice, GUILD_KIND_DISTRIBUTE, bytes32(0));
+        uint256 before = token.balanceOf(alice);
+        vm.prank(alice);
+        realm.distributeTreasury(p);
+        assertEq(token.balanceOf(alice), before + credited);
+        assertEq(token.balanceOf(address(realm)), realm.carriedIncome());
+        vm.warp(GENESIS + 20 * EPOCH);
+        _settleAll();
+        realm.harvest(1);
+        assertEq(realm.treasury(1), 0, "idle epochs must not create more income");
+        p = _propose(alice, GUILD_KIND_DISTRIBUTE, bytes32(0));
+        vm.prank(alice);
+        vm.expectRevert(Realm.NothingToDistribute.selector);
+        realm.distributeTreasury(p);
+        _assertRealmSolvent(1, 0);
+    }
+
+    function testFuzz_incomeStaysBackedAcrossHarvestsPayoutsAndTileChanges(
+        uint8 tilesASeed,
+        uint8 tilesBSeed,
+        uint32 troopsASeed,
+        uint32 troopsBSeed
+    ) public {
+        uint256 tilesA = bound(tilesASeed, 1, 7);
+        uint256 tilesB = bound(tilesBSeed, 1, 7);
+        _found(alice, "Alpha");
+        _found(bob, "Beta");
+        _buy(alice, 1, bound(troopsASeed, 10, 1000));
+        _buy(bob, 2, bound(troopsBSeed, 10, 1000));
+        for (uint256 tile; tile < tilesA; ++tile) {
+            _attack(alice, tile, 1);
+        }
+        for (uint256 tile; tile < tilesB; ++tile) {
+            _attack(bob, tilesA + tile, 1);
+        }
+        vm.warp(GENESIS + 4 * EPOCH);
+        _settleAll();
+        uint256 income = token.balanceOf(address(realm));
+        uint256 perTile = income / (tilesA + tilesB);
+        assertEq(realm.pendingIncome(1), perTile * tilesA);
+        assertEq(realm.pendingIncome(2), perTile * tilesB);
+        assertEq(realm.carriedIncome(), income % (tilesA + tilesB));
+        realm.harvest(1);
+        realm.harvest(1);
+        _assertRealmSolvent(2, 0);
+        _paySoloTreasuries();
+        assertEq(token.balanceOf(address(realm)), realm.carriedIncome());
+
+        // New income combines with the old remainder, then one tile changes hands.
+        _buy(bob, 2, 10);
+        _attack(bob, 0, 3);
+        _nextEpoch();
+        _settleAll();
+        assertEq(realm.tilesHeld(1), tilesA - 1);
+        assertEq(realm.tilesHeld(2), tilesB + 1);
+        realm.harvest(1);
+        realm.harvest(2);
+        _assertRealmSolvent(2, 0);
+        _paySoloTreasuries();
+        assertEq(token.balanceOf(address(realm)), realm.carriedIncome());
+        _nextEpoch();
+        _settleAll();
+        assertEq(realm.pendingIncome(1) + realm.pendingIncome(2), 0);
+        _assertRealmSolvent(2, 0);
+    }
+
+    function _paySoloTreasuries() internal {
+        address[2] memory members = [alice, bob];
+        for (uint256 i; i < members.length; ++i) {
+            uint256 p = _propose(members[i], GUILD_KIND_DISTRIBUTE, bytes32(0));
+            vm.prank(members[i]);
+            realm.distributeTreasury(p);
+        }
+    }
+
     // ------------------------------------------------------------ treasury
 
     function test_distributeTreasuryByVote() public {

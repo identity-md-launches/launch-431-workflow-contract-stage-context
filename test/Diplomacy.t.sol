@@ -146,6 +146,9 @@ contract DiplomacyTest is PactsBase {
         assertFalse(diplomacy.betrayedDuring(1, 0, 3));
         assertFalse(diplomacy.betrayedDuring(2, 3, 3));
 
+        vm.expectRevert(Diplomacy.PactStillActive.selector);
+        diplomacy.settlePact(0);
+        _nextEpoch();
         vm.prank(carol); // anyone settles
         diplomacy.settlePact(0);
         Diplomacy.Pact memory p = diplomacy.pact(0);
@@ -185,12 +188,45 @@ contract DiplomacyTest is PactsBase {
         _signDefault(3);
         _attack(alice, 1, 5);
         _attack(bob, 0, 5);
+        vm.expectRevert(Diplomacy.PactStillActive.selector);
+        diplomacy.settlePact(0);
+        _nextEpoch();
         diplomacy.settlePact(0);
         assertEq(diplomacy.pact(0).brokenBy, 3);
         assertEq(realm.treasury(1), 100e18 - BOND_A + BOND_B);
         assertEq(realm.treasury(2), 100e18 - BOND_B + BOND_A);
         assertEq(realm.lockedBonds(1), 0);
         assertEq(realm.lockedBonds(2), 0);
+        _assertRealmSolvent(2, 0);
+    }
+
+    function testFuzz_sameEpochBondsIgnoreEarlySettlementAttempt(bool aliceFirst) public {
+        _twoGuildsWithTiles();
+        _signDefault(3);
+        _attack(aliceFirst ? alice : bob, aliceFirst ? 1 : 0, 5);
+        uint256 snapshot = vm.snapshotState();
+
+        // The second guild's bond must stay locked while it can still betray in this epoch.
+        vm.warp(GENESIS + 2 * EPOCH - 1);
+        vm.expectRevert(Diplomacy.PactStillActive.selector);
+        diplomacy.settlePact(0);
+        assertFalse(diplomacy.pact(0).settled);
+        assertEq(realm.lockedBonds(1), BOND_A);
+        assertEq(realm.lockedBonds(2), BOND_B);
+        _attack(aliceFirst ? bob : alice, aliceFirst ? 0 : 1, 5);
+        vm.warp(GENESIS + 2 * EPOCH);
+        diplomacy.settlePact(0); // exact boundary, even before Realm settles the battles
+        uint256 treasuryA = realm.treasury(1);
+        uint256 treasuryB = realm.treasury(2);
+        assertEq(diplomacy.pact(0).brokenBy, 3);
+
+        assertTrue(vm.revertToState(snapshot));
+        _attack(aliceFirst ? bob : alice, aliceFirst ? 0 : 1, 5);
+        vm.warp(GENESIS + 2 * EPOCH);
+        diplomacy.settlePact(0);
+        assertEq(realm.treasury(1), treasuryA);
+        assertEq(realm.treasury(2), treasuryB);
+        assertEq(diplomacy.pact(0).brokenBy, 3);
         _assertRealmSolvent(2, 0);
     }
 
@@ -258,6 +294,7 @@ contract DiplomacyTest is PactsBase {
         assertEq(realm.lockedBonds(2), bondB);
         if (betray) {
             _attack(alice, 1, 1);
+            _nextEpoch();
         } else {
             vm.warp(GENESIS + 3 * EPOCH);
         }

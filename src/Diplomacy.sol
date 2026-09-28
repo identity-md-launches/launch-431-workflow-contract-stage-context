@@ -9,8 +9,8 @@ import {IRealm} from "./interfaces/IRealm.sol";
 /// @dev Created by Realm in its constructor, which is how Realm knows this contract is the only
 /// address allowed to lock, release and slash treasury bonds. A pact is signed when both guilds
 /// have passed matching KIND_PACT proposals. Betrayal is a fact recorded by Realm: declaring an
-/// attack on a tile the partner holds during the pact window. Anyone can settle a pact at any time
-/// after a betrayal, or once the window has passed; the outcome is the same whoever calls and
+/// attack on a tile the partner holds during the pact window. Anyone can settle a pact once
+/// the first betrayal epoch has ended, or once the window has passed; the outcome is the same whoever calls and
 /// whenever they call, so the slash is automatic in effect even though a transaction triggers it.
 contract Diplomacy {
     struct Pact {
@@ -138,13 +138,17 @@ contract Diplomacy {
     }
 
     /// @notice Settle a pact: slash the betrayer's bond to the victim, or return both bonds once
-    /// the window has passed unbroken. Anyone may call.
+    /// the window has passed unbroken. Anyone may call after the first betrayal epoch ends,
+    /// allowing both sides' attacks in that epoch to count before any bonds are released.
     function settlePact(uint256 pactId) external {
         if (pactId >= _pacts.length) revert NoSuchPact();
         Pact storage p = _pacts[pactId];
         if (p.settled) revert AlreadySettled();
         (bool byA, uint256 epochA, bool byB, uint256 epochB) = _betrayal(p);
-        if (!byA && !byB && realm.currentEpoch() <= p.endEpoch) revert PactStillActive();
+        uint256 current = realm.currentEpoch();
+        if ((!byA && !byB && current <= p.endEpoch) || (byA && current <= epochA) || (byB && current <= epochB)) {
+            revert PactStillActive();
+        }
 
         p.settled = true;
         uint256 a = p.guildA;

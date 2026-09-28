@@ -327,9 +327,11 @@ contract Realm {
             carriedIncome = amount;
             return;
         }
-        uint256 perTile = amount * ACC_SCALE / tiles;
-        accIncomePerTile += perTile;
-        uint256 distributed = perTile * tiles / ACC_SCALE;
+        // Credit whole token minor units per tile. The remainder is not also credited to the
+        // accumulator, so carrying it into later epochs cannot create unbacked income.
+        uint256 perTile = amount / tiles;
+        accIncomePerTile += perTile * ACC_SCALE;
+        uint256 distributed = perTile * tiles;
         carriedIncome = amount - distributed;
         emit IncomeDistributed(epoch, distributed, tiles);
     }

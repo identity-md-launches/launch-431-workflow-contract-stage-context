@@ -45,6 +45,7 @@ contract Season {
     mapping(uint256 season => Closing) private _closing;
     mapping(uint256 season => Result) private _results;
     mapping(uint256 season => mapping(address member => uint256)) public claimable;
+    /// @notice Unclaimed victory rank (1..3), including when the token prize is zero; cleared on claim.
     mapping(uint256 season => mapping(address member => uint8)) public claimRank;
     mapping(uint256 season => mapping(uint256 guildId => bool)) public honourClaimed;
 
@@ -64,6 +65,7 @@ contract Season {
     error AlreadyClosed();
     error ZeroBudget();
     error SeasonNotSettled();
+    error PreviousSeasonNotClosed();
     error SeasonNotEnded();
     error NothingToClaim();
     error AlreadyClaimed();
@@ -94,11 +96,13 @@ contract Season {
     // ---------------------------------------------------------------- closing
 
     /// @notice Rank up to `maxGuilds` more guilds of an ended, fully settled season; the season is
-    /// closed when every guild that existed at the first call has been ranked.
+    /// closed when every guild that existed at the first call has been ranked. The previous
+    /// season must be closed first so all incoming rollover is included in this season's prizes.
     function close(uint256 season, uint256 maxGuilds) external {
         if (_results[season].closed) revert AlreadyClosed();
         if (maxGuilds == 0) revert ZeroBudget();
         if (realm.settledEpoch() < (season + 1) * epochsPerSeason) revert SeasonNotSettled();
+        if (season != 0 && !_results[season - 1].closed) revert PreviousSeasonNotClosed();
         Closing storage c = _closing[season];
         if (c.guildCount == 0) c.guildCount = uint64(guilds.guildCount());
         uint256 i = c.cursor;
@@ -141,7 +145,6 @@ contract Season {
             address[] memory members = guilds.membersOf(guildId);
             if (members.length == 0) continue;
             uint256 each = (pool * shares[rank] / 100) / members.length;
-            if (each == 0) continue;
             for (uint256 m; m < members.length; ++m) {
                 claimable[season][members[m]] = each;
                 claimRank[season][members[m]] = uint8(rank + 1);
@@ -158,14 +161,16 @@ contract Season {
 
     // ---------------------------------------------------------------- claims
 
-    /// @notice Claim the caller's share of a closed season's prize and the victory banner.
+    /// @notice Claim the caller's share of a closed season's prize and the victory banner,
+    /// even if the token prize is zero. Each eligible member may claim only once.
     function claimPrize(uint256 season) external returns (uint256 tokenId) {
-        uint256 amount = claimable[season][msg.sender];
-        if (amount == 0) revert NothingToClaim();
-        delete claimable[season][msg.sender];
         uint8 rank = claimRank[season][msg.sender];
+        if (rank == 0) revert NothingToClaim();
+        uint256 amount = claimable[season][msg.sender];
+        delete claimable[season][msg.sender];
+        delete claimRank[season][msg.sender];
         uint256 guildId = _results[season].winners[rank - 1];
-        if (!token.transfer(msg.sender, amount)) revert TransferFailed();
+        if (amount != 0 && !token.transfer(msg.sender, amount)) revert TransferFailed();
         tokenId = banners.mint(msg.sender, season, guildId, banners.KIND_VICTORY(), rank);
         emit PrizeClaimed(season, guildId, msg.sender, rank, amount, tokenId);
     }
