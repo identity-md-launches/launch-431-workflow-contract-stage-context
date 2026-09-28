@@ -33,6 +33,7 @@ contract PactsHandler is Test {
     uint256 public signedPacts;
     uint256 public settledPacts;
     uint256 public closedSeasons;
+    uint256 public zeroPrizeClaims;
     mapping(uint256 => bytes32) public closedResult;
     mapping(uint256 => bytes32) public settledPact;
 
@@ -145,14 +146,12 @@ contract PactsHandler is Test {
             beforeBalances[i] = token.balanceOf(members[i]);
         }
         vm.prank(members[0]);
-        (bool ok,) = address(realm).call(abi.encodeCall(Realm.distributeTreasury, (p)));
-        // This checks transfer amounts and rollback, not withdrawal liveness. The separate
-        // reported income-rounding reproduction demonstrates an unbacked treasury liability.
+        realm.distributeTreasury(p);
         for (uint256 i; i < members.length; ++i) {
-            assertEq(token.balanceOf(members[i]), beforeBalances[i] + (ok ? each : 0));
+            assertEq(token.balanceOf(members[i]), beforeBalances[i] + each);
         }
-        assertEq(realm.proposalUsed(p), ok, "execution flag must roll back with payment");
-        if (ok) treasuryPaid += each * members.length;
+        assertTrue(realm.proposalUsed(p));
+        treasuryPaid += each * members.length;
     }
 
     function sign(uint256 guildSeed, uint256 partnerSeed, uint256 bondSeed, uint256 durationSeed) public {
@@ -179,8 +178,24 @@ contract PactsHandler is Test {
         uint256 id = pactSeed % count;
         Diplomacy.Pact memory p = diplomacy.pact(id);
         if (p.settled) return;
-        (bool a,, bool b,) = diplomacy.betrayalOf(id);
-        if (!a && !b && realm.currentEpoch() <= p.endEpoch) return;
+        (bool a, uint256 epochA, bool b, uint256 epochB) = diplomacy.betrayalOf(id);
+        uint256 current = realm.currentEpoch();
+        if ((!a && !b && current <= p.endEpoch) || (a && current == epochA) || (b && current == epochB)) {
+            uint256 treasuryA = realm.treasury(p.guildA);
+            uint256 treasuryB = realm.treasury(p.guildB);
+            uint256 lockedA = realm.lockedBonds(p.guildA);
+            uint256 lockedB = realm.lockedBonds(p.guildB);
+            vm.expectRevert(Diplomacy.PactStillActive.selector);
+            diplomacy.settlePact(id);
+            assertEq(keccak256(abi.encode(diplomacy.pact(id))), keccak256(abi.encode(p)));
+            assertEq(realm.treasury(p.guildA), treasuryA);
+            assertEq(realm.treasury(p.guildB), treasuryB);
+            assertEq(realm.lockedBonds(p.guildA), lockedA);
+            assertEq(realm.lockedBonds(p.guildB), lockedB);
+            assertEq(diplomacy.activePactBetween(p.guildA, p.guildB), id + 1);
+            assertEq(diplomacy.activePactBetween(p.guildB, p.guildA), id + 1);
+            return;
+        }
         diplomacy.settlePact(id);
         settledPact[id] = keccak256(abi.encode(diplomacy.pact(id)));
         ++settledPacts;
@@ -191,7 +206,18 @@ contract PactsHandler is Test {
         if (ended == 0) return;
         uint256 id = seasonSeed % ended;
         if (season.result(id).closed) return;
-        season.close(id, bound(budgetSeed, 1, 3));
+        uint256 budget = bound(budgetSeed, 1, 3);
+        if (id != 0 && !season.result(id - 1).closed) {
+            bytes32 beforeClosing = keccak256(abi.encode(season.closing(id)));
+            uint256 beforePool = season.prizePool(id);
+            vm.expectRevert(Season.PreviousSeasonNotClosed.selector);
+            season.close(id, budget);
+            assertEq(keccak256(abi.encode(season.closing(id))), beforeClosing);
+            assertEq(season.prizePool(id), beforePool);
+            assertFalse(season.result(id).closed);
+            return;
+        }
+        season.close(id, budget);
         Season.Result memory r = season.result(id);
         if (r.closed) {
             assertEq(r.prizes[0] + r.prizes[1] + r.prizes[2] + r.rollover, season.prizePool(id));
@@ -206,16 +232,22 @@ contract PactsHandler is Test {
         address actor = actors[actorSeed % 6];
         uint256 id = seasonSeed % ended;
         uint256 amount = season.claimable(id, actor);
-        if (amount == 0) return;
+        uint8 rank = season.claimRank(id, actor);
+        if (rank == 0) return;
+        uint256 winner = season.result(id).winners[rank - 1];
         uint256 beforeBalance = token.balanceOf(actor);
         vm.prank(actor);
         uint256 nft = season.claimPrize(id);
         assertEq(token.balanceOf(actor), beforeBalance + amount);
         assertEq(season.claimable(id, actor), 0);
+        assertEq(season.claimRank(id, actor), 0);
         assertEq(banners.ownerOf(nft), actor);
         assertEq(banners.banner(nft).season, id);
         assertEq(banners.banner(nft).kind, 1);
+        assertEq(banners.banner(nft).rank, rank);
+        assertEq(banners.banner(nft).guild, winner);
         prizesPaid += amount;
+        if (amount == 0) ++zeroPrizeClaims;
         ++trophies;
         vm.prank(actor);
         vm.expectRevert(Season.NothingToClaim.selector);
@@ -412,6 +444,32 @@ contract PactsInvariantTest is StdInvariant, Test {
         assertEq(nftBalances, handler.trophies(), "NFT balances must match actual mints");
     }
 
+    function invariant_realmBalanceExactlyBacksAllLiabilities() public view {
+        uint256 owed = realm.carriedIncome();
+        for (uint256 g = 1; g <= 3; ++g) {
+            owed += realm.treasury(g) + realm.pendingIncome(g) + realm.lockedBonds(g);
+        }
+        // Income is distributed before the first battle. A partially settled epoch's
+        // historical incomePool is already represented in treasuries/pending income/carry.
+        uint256 firstUncredited = realm.settledEpoch();
+        if (realm.settleCursor() != 0) ++firstUncredited;
+        for (uint256 e = firstUncredited; e <= realm.currentEpoch(); ++e) {
+            owed += realm.incomePool(e);
+        }
+        assertEq(token.balanceOf(address(realm)), owed + handler.realmDonations(), "unbacked or lost income");
+    }
+
+    function invariant_seasonBalanceExactlyBacksPrizesAndOpenPools() public view {
+        uint256 owed;
+        for (uint256 s; s <= realm.currentEpoch() / realm.epochsPerSeason(); ++s) {
+            if (!season.result(s).closed) owed += season.prizePool(s);
+            for (uint256 i; i < 6; ++i) {
+                owed += season.claimable(s, handler.actors(i));
+            }
+        }
+        assertEq(token.balanceOf(address(season)), owed + handler.seasonDonations(), "unbacked or stranded prizes");
+    }
+
     function invariant_mapAndTroopsAreConserved() public view {
         uint256[4] memory tiles;
         uint256 liveTroops;
@@ -495,10 +553,102 @@ contract PactsInvariantTest is StdInvariant, Test {
         for (uint256 s; s <= realm.currentEpoch() / 4; ++s) {
             bytes32 frozen = handler.closedResult(s);
             if (frozen != 0) {
-                assertTrue(season.result(s).closed);
-                assertEq(keccak256(abi.encode(season.result(s))), frozen);
+                Season.Result memory r = season.result(s);
+                assertTrue(r.closed);
+                assertEq(keccak256(abi.encode(r)), frozen);
+                assertEq(season.prizePool(s), r.prizes[0] + r.prizes[1] + r.prizes[2] + r.rollover);
+                if (s != 0) assertTrue(season.result(s - 1).closed, "closed seasons form a prefix");
             }
         }
+    }
+
+    function test_handlerRejectsEarlyPactSettlementAndIncludesCounterattack() public {
+        uint256 treasuryA = realm.treasury(1);
+        uint256 treasuryB = realm.treasury(2);
+        Diplomacy.Pact memory p = diplomacy.pact(0);
+        handler.attack(0, 1, 1);
+        handler.settlePact(0); // Must test PactStillActive, not swallow an arbitrary failure.
+        assertFalse(diplomacy.pact(0).settled);
+        assertEq(handler.settledPacts(), 0);
+        handler.attack(1, 0, 1);
+        handler.settlePact(0);
+        assertFalse(diplomacy.pact(0).settled);
+        handler.advance(1 hours);
+        handler.settlePact(0); // Does not require battle settlement.
+        assertEq(diplomacy.pact(0).brokenBy, 3);
+        assertEq(handler.settledPacts(), 1);
+        assertEq(realm.treasury(1), treasuryA + p.bondB);
+        assertEq(realm.treasury(2), treasuryB + p.bondA);
+        invariant_bondsExactlyMatchUnsettledPacts();
+        invariant_realmBalanceExactlyBacksAllLiabilities();
+    }
+
+    function test_handlerRejectsOutOfOrderCloseThenCatchesUpInChunks() public {
+        for (uint256 i; i < 4; ++i) {
+            handler.advance(2 hours);
+        }
+        handler.settle(160);
+        assertEq(realm.settledEpoch(), 12);
+        handler.close(2, 3);
+        assertFalse(season.result(2).closed);
+        assertEq(season.closing(2).cursor, 0);
+        handler.close(1, 1);
+        assertEq(season.closing(1).cursor, 1);
+        handler.close(2, 3);
+        assertFalse(season.result(2).closed);
+        assertEq(season.closing(2).guildCount, 0);
+        handler.close(1, 2);
+        handler.close(2, 3);
+        assertEq(handler.closedSeasons(), 3);
+        invariant_closedResultsNeverChange();
+        invariant_seasonBalanceExactlyBacksPrizesAndOpenPools();
+    }
+
+    function test_handlerClaimsZeroPrizeAfterChangingGuild() public {
+        handler.advance(2 hours);
+        handler.advance(2 hours);
+        handler.settle(160);
+        handler.close(1, 3);
+        address actor = handler.actors(0);
+        assertEq(season.prizePool(1), 0);
+        assertEq(season.claimable(1, actor), 0);
+        assertEq(season.claimRank(1, actor), 1);
+        handler.membership(0, 1); // Guild 2, after winning as a member of guild 1.
+        assertEq(guilds.guildOf(actor), 2);
+        uint256 minted = banners.totalMinted();
+        uint256 balance = token.balanceOf(actor);
+        handler.claim(0, 1);
+        assertEq(handler.zeroPrizeClaims(), 1);
+        assertEq(banners.totalMinted(), minted + 1);
+        assertEq(banners.ownerOf(minted + 1), actor);
+        assertEq(banners.banner(minted + 1).guild, 1);
+        assertEq(banners.banner(minted + 1).rank, 1);
+        assertEq(token.balanceOf(actor), balance);
+        assertEq(season.claimRank(1, actor), 0);
+        vm.prank(actor);
+        vm.expectRevert(Season.NothingToClaim.selector);
+        season.claimPrize(1);
+        invariant_onlyRecordedPaymentsMoveCustodiedTokens();
+        invariant_seasonBalanceExactlyBacksPrizesAndOpenPools();
+    }
+
+    function test_liabilitiesStayBackedDuringPartialSettlementAndPayout() public {
+        handler.buy(0, 7, false);
+        handler.attack(0, 140, 1);
+        handler.attack(1, 141, 1);
+        handler.attack(2, 142, 1);
+        handler.advance(1 hours);
+        handler.settle(1);
+        assertEq(realm.settledEpoch(), 4);
+        assertEq(realm.settleCursor(), 1);
+        invariant_realmBalanceExactlyBacksAllLiabilities();
+        handler.distribute(0);
+        assertGt(handler.treasuryPaid(), 0);
+        invariant_realmBalanceExactlyBacksAllLiabilities();
+        handler.settle(160);
+        assertEq(realm.settledEpoch(), 5);
+        invariant_realmBalanceExactlyBacksAllLiabilities();
+        invariant_seasonBalanceExactlyBacksPrizesAndOpenPools();
     }
 
     function test_handlerReachesCustodyAndPayoutStates() public {
@@ -517,6 +667,8 @@ contract PactsInvariantTest is StdInvariant, Test {
         assertEq(handler.closedSeasons(), 1);
         invariant_fixedSupplyAndCompleteTokenHolderSet();
         invariant_onlyRecordedPaymentsMoveCustodiedTokens();
+        invariant_realmBalanceExactlyBacksAllLiabilities();
+        invariant_seasonBalanceExactlyBacksPrizesAndOpenPools();
         invariant_mapAndTroopsAreConserved();
         invariant_bondsExactlyMatchUnsettledPacts();
         invariant_membershipAndVotesAgree();
